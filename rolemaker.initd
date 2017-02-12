@@ -1,0 +1,63 @@
+#!/bin/bash
+#
+# rolemaker	This script starts and stops the Rolemaker daemon
+#
+# chkconfig: 2345 99 01
+# description: Rolemaker allows end users to create restricted AWS roles.
+
+### BEGIN INIT INFO
+# Profiles: rolemaker
+# Required-Start: $network $local_fs $remote_fs
+# Required-Stop: $network $local_fs $remote_fs
+# Should-Start: $named ntpdate
+# Short-Description: Rolemaker allows end users to create restricted AWS roles.
+# Description: Rolemaker allows end users to create restricted AWS roles.
+### END INIT INFO
+
+# Source function library
+. /etc/init.d/functions
+
+prog=rolemaker
+HTTP_PORT=80
+HTTPS_PORT=443
+
+# If sysconfig or default override files exist, use them
+[[ -f /etc/sysconfig/rolemaker ]] && . /etc/sysconfig/rolemaker
+[[ -f /etc/default/rolemaker ]] && . /etc/default/rolemaker
+
+start() {
+    echo -n $"Starting $prog: "
+    daemon /opt/rolemaker/$prog -p /var/run/rolemaker.pid
+    RETVAL=$?
+    echo
+    return $RETVAL
+}
+
+stop() {
+    echo -n $"Shutting down $prog: "
+    killproc $prog
+    RETVAL=$?
+    echo
+    return $RETVAL
+}
+
+# See how we were called.
+case "$1" in
+    start) start;;
+    stop) stop;;
+    status) status $prog;;
+    restart|force-reload) stop; start;;
+    try-restart|condrestart)
+	if status $prog > /dev/null; then
+	    stop
+	    start
+	fi
+	;;
+    reload )
+	exit 3
+	;;
+    *)
+	echo $"Usage: $0 {start|stop|status|restart|try-restart|force-reload}"
+	exit 2
+esac
+

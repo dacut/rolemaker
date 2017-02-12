@@ -27,7 +27,7 @@ region_name_to_code = {
     u"US West Oregon": "us-west-2",
 }
 
-ami_types = ("HVM64_EBS", "HVM64_Instance", "PV64_EBS", "PV64_Instance",)
+ami_types = ("HVM64EBS", "HVM64Instance", "PV64EBS", "PV64Instance",)
 
 soup = BeautifulSoup(page, "html.parser")
 region_rows = soup.find("div", class_="aws-table").find_all("tr")[1:]
