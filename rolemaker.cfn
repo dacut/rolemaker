@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Rolemaker -- Allow end users to create restricted AWS roles"
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: The key pair to use when launching EC2 instances.
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: The allowable subnets for the EC2 instances.
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: The EC2 instance type to run on.
+    AllowedValues:
+      - c3.large
+      - c3.xlarge
+      - c3.2xlarge
+      - c3.4xlarge
+      - c3.8xlarge
+      - c4.large
+      - c4.xlarge
+      - c4.2xlarge
+      - c4.4xlarge
+      - c4.8xlarge
+      - m3.medium
+      - m3.large
+      - m3.xlarge
+      - m3.2xlarge
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+      - m4.10xlarge
+      - m4.16xlarge
+      - r3.large
+      - r3.xlarge
+      - r3.2xlarge
+      - r3.4xlarge
+      - r3.8xlarge
+      - r4.large
+      - r4.xlarge
+      - r4.2xlarge
+      - r4.4xlarge
+      - r4.8xlarge
+      - r4.16xlarge
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t2.2xlarge
+  MaxInstances:
+    Type: Number
+    Default: 2
+    Description: The maximum number of instances to create in the autoscaling group.
+    MinValue: 1
+  EnableDebug:
+    Type: String
+    Default: false
+    Description: Whether debugging output should be provided.
+    AllowedValues:
+      - false
+      - true
+Mappings:
+  AmazonLinuxAMI:
+    ap-northeast-1:
+      HVM64_EBS: ami-56d4ad31
+      HVM64_Instance: ami-0ed3aa69
+      PV64_EBS: ami-bdd2abda
+      PV64_Instance: ami-55d4ad32
+    ap-northeast-2:
+      HVM64_EBS: ami-dac312b4
+      HVM64_Instance: ami-13c0117d
+    ap-south-1:
+      HVM64_EBS: ami-f9daac96
+      HVM64_Instance: ami-09d1a766
+    ap-southeast-1:
+      HVM64_EBS: ami-dc9339bf
+      HVM64_Instance: ami-809238e3
+      PV64_EBS: ami-2c963c4f
+      PV64_Instance: ami-de9339bd
+    ap-southeast-2:
+      HVM64_EBS: ami-1c47407f
+      HVM64_Instance: ami-73464110
+      PV64_EBS: ami-6f47400c
+      PV64_Instance: ami-2f45424c
+    cn-central-1:
+      HVM64_EBS: ami-ebed508f
+      HVM64_Instance: ami-07f34e63
+    cn-north-1:
+      HVM64_EBS: ami-e6c7108b
+      HVM64_Instance: ami-31c6115c
+      PV64_EBS: ami-34c21559
+      PV64_Instance: ami-e8c41385
+    eu-central-1:
+      HVM64_EBS: ami-af0fc0c0
+      HVM64_Instance: ami-e80dc287
+      PV64_EBS: ami-3b0fc054
+      PV64_Instance: ami-a80fc0c7
+    eu-west-1:
+      HVM64_EBS: ami-70edb016
+      HVM64_Instance: ami-50efb236
+      PV64_EBS: ami-e0f2af86
+      PV64_Instance: ami-49ecb12f
+    eu-west-2:
+      HVM64_EBS: ami-f1949e95
+      HVM64_Instance: ami-84aba1e0
+    sa-east-1:
+      HVM64_EBS: ami-80086dec
+      HVM64_Instance: ami-550b6e39
+      PV64_EBS: ami-2a096c46
+      PV64_Instance: ami-da0e6bb6
+    us-east-1:
+      HVM64_EBS: ami-0b33d91d
+      HVM64_Instance: ami-4a3cd65c
+      PV64_EBS: ami-7a3dd76c
+      PV64_Instance: ami-f73cd6e1
+    us-east-2:
+      HVM64_EBS: ami-c55673a0
+      HVM64_Instance: ami-574b6e32
+    us-gov-west-1:
+      HVM64_EBS: ami-b21fa4d3
+      HVM64_Instance: ami-0d19a26c
+      PV64_EBS: ami-6d1da60c
+      PV64_Instance: ami-b31fa4d2
+    us-west-1:
+      HVM64_EBS: ami-165a0876
+      HVM64_Instance: ami-25540645
+      PV64_EBS: ami-f25a0892
+      PV64_Instance: ami-5f5b093f
+    us-west-2:
+      HVM64_EBS: ami-f173cc91
+      HVM64_Instance: ami-d475cab4
+      PV64_EBS: ami-8a72cdea
+      PV64_Instance: ami-f174cb91
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      -
+        Label:
+          default: Advanced
+        Parameters:
+          - EnableDebug
+Resources:
+  AutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      Cooldown: 600
+      DesiredCapacity: 1
+      LaunchConfigurationName: !Ref LaunchConfig
+      MaxSize: !Ref MaxInstances
+      MinSize: 1
+      Tags:
+        - Key: Name
+          Value: RoleMaker
+          PropagateAtLaunch: true
+      VPCZoneIdentifier: !Ref Subnets
+  LaunchConfig:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      AssociatePublicIpAddress: true
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !FindInMap ["AmazonLinuxAMI", !Ref "AWS::Region", "HVM64_EBS"]
+      InstanceMonitoring: true
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups: [ !Ref SecurityGroup ]
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+  InstanceRole:
+
+Outputs:
+  SiteURL:
+    Description: Browse to this URL to manage your site.
+    Value: !Join ["", ["https://", !Ref "Api", ".execute-api.",
+                       !Ref "AWS::Region", ".amazonaws.com/prod/admin/login?",
+                       "otp=", !GetAtt OneTimePasswordGeneration.Password]]

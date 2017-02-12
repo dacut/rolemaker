@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    {% block head %}
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="{{url_for("static", filename="css/bootstrap.min.css")}}">
+    <link rel="stylesheet" href="{{url_for("static", filename="css/bootstrap-theme.min.css")}}">
+    <link rel="stylesheet" href="{{url_for("static", filename="css/rolemaker.css")}}">
+    <title>{% block title %}{% endblock title %}</title>
+    {% endblock head %}
+  </head>
+  <body>
+    {% block topnav %}
+    <nav class="navbar navbar-inverse navbar-fixed-top">
+      <div class="container">
+        <div class="navbar-header">
+          <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+            <span class="sr-only">Toggle navigation</span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+          </button>
+          <a class="navbar-brand" href="#">{{site_info.name}}</a>
+        </div>
+        <div id="navbar" class="navbar-collapse collapse">
+          <ul class="nav navbar-nav">
+            <li class="{% block navbar_home_class %}{% endblock %}"><a href="{% block navbar_home_link %}{{url_for("index")}}{% endblock %}">Home</a></li>
+            <li class="{% block navbar_list %}{% endblock %}"><a href="{% block navbar_screenshot_link %}{{url_for("screenshot")}}{% endblock %}">Console Screenshot</a></li>
+          </ul>
+          <ul class="nav navbar-nav navbar-right">
+            <li class="{% block navbar_admin_class %}{% endblock %}">
+              <a href="{% block navbar_admin_link %}{{url_for("admin")}}{% endblock %}">Admin</a>
+            </li>
+            <li class="{% block navbar_account_class %}{% endblock %}{% if request.user %} dropdown{% endif %}">
+              {% if request.user %}
+              <a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">
+                {{- request.user["FullName"]|e -}} <span class="caret"></span></a>
+              <ul class="dropdown-menu">
+                <li><a href="{{url_for("account")}}">Account settings</a></li>
+                <li><a href="{{url_for("logout")}}">Logout</a></li>
+              </ul>
+              {% else %}
+              <a href="{% block navbar_account_link %}{{url_for("login")}}{% endblock %}">Login</a></li>
+              {% endif%}
+            </li>
+          </ul>
+        </div>
+      </div>
+    </nav>
+    {% endblock topnav %}
+    {% block body %}
+    <div class="container">
+      {% block flashed_messages %}
+      {% for category in ("error", "warning", "info") %}
+      {% with messages = get_flashed_messages(category_filter=[category]) %}
+      {% if messages %}
+      {% for message in messages %}
+      <div class="row">
+        <div class="col-xs-12 col-sm-12 callout callout-{{ category }}">{{ message|safe }}</div>
+      </div>
+      {% endfor %}
+      {% endif %}
+      {% endwith %}
+      {% endfor %}
+      {% endblock flashed_messages %}
+      {% block body_container %}
+      {% endblock body_container %}
+    </div>
+    {% endblock body %}
+    {% block bodytailscripts %}
+    <script src="{{url_for("static", filename="js/jquery-3.1.1.js")}}"></script>
+    <script src="{{url_for("static", filename="js/bootstrap.min.js")}}"></script>
+    <script src="{{url_for("static", filename="js/underscore-min.js")}}"></script>
+    <script src="{{url_for("static", filename="js/pagination.js")}}"></script>
+    {% endblock bodytailscripts %}
+    {% block pagescripts %}{% endblock pagescripts %}
+  </body>
+</html>

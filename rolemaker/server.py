@@ -1,9 +1,7 @@
 #!/usr/bin/env python
 from __future__ import absolute_import, division, print_function
+import boto3
 from flask import abort, Flask, make_response, redirect, request, session
-import boto.kms
-import boto.s3
-from boto.s3.connection import OrdinaryCallingFormat
 from getopt import getopt, GetoptError
 from hashlib import sha256
 from hmac import new as hmac
@@ -14,13 +12,14 @@ from mako.lookup import TemplateLookup
 from mako.template import Template
 from .mimetypes import read_mime_types
 from .model import PolicyModel
-from os.path import dirname, exists, isfile, isdir, splitext
+from os.path import dirname, environ, exists, isfile, isdir, splitext, urandom
 from re import compile as re_compile
 from rolemaker import AuthenticationRequiredError
 from rolemaker.s3 import S3ClientEncryptionHandler
 from sys import argv, stderr, stdout
 from time import time
 from urllib import unquote as url_unquote
+from urllib2 import URLError, urlopen
 from werkzeug.datastructures import Headers
 
 DEFAULT_REGION = "us-gov-west-1"
@@ -35,11 +34,35 @@ MULTISLASH = re_compile(r"//+")
 # Regex for validating IAM role and policy names
 IAM_NAME_REGEX = re_compile(r"^[\w\+=,\.@-]*$")
 
-class Redirect(Exception):
-    def __init__(self, location):
-        super(Redirect, self).__init__()
-        self.location = location
-        return
+def get_instance_availability_zone():
+    """
+    If running on EC2, get the availability zone we're running in. Otherwise
+    returns None.
+    """
+    global _availability_zone
+
+    try:
+        return _availability_zone
+    except NameError:
+        try:
+            r = urlopen("http://169.254.169.254/latest/meta-data/placement/"
+                    "availability-zone", timeout=0.05)
+            _availability_zone = r.read()
+        except URLError:
+            _availability_zone = None
+    
+    return _availability_zone
+
+app = Flask(__name__)
+app.config["DEBUG"] = False
+app.config["SECRET_KEY"] = urandom(18)
+app.config["SESSION_COOKIE_NAME"] = "session"
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = int(environ.get(
+    "ROLEMAKER_SESSION_LIFETIME", "3600"))
+app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+
+
 
 class RolemakerServer(Flask):
     """
