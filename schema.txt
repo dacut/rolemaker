@@ -9,7 +9,7 @@ Parameters:
     Valid parameters:
         SecretKey: the secret key for Flask sessions
         SessionLifetime: lifetime, in seconds, before we re-require SAML auth.
-        InitialPasswordHash: hash of the initial password used to manage the system.
+        AdminPasswordHash: hash of the initial password used to manage the system.
 
 Accounts:
     Accounts managed by Rolemaker

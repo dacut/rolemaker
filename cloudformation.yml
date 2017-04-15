@@ -112,6 +112,14 @@ Resources:
               - Effect: Allow
                 Action: "sts:AssumeRole"
                 Resource: "*"
+  AdminPasswordGen:
+    Type: Custom::GeneratePassword
+    DependsOn:
+      - ParameterTable
+    Properties:
+      ServiceToken: !GetAtt ApiFunction.Arn
+      ParameterName: AdminPasswordHash
+      Dummy: Ignored
   RestApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
@@ -206,3 +214,7 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !GetAtt ApiFunction.Arn
+Outputs:
+  AdminPassword:
+    Description: Initial administrative password
+    Value: !GetAtt AdminPasswordGen.Password

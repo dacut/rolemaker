@@ -3,6 +3,9 @@ from __future__ import absolute_import, print_function
 import boto3
 from json import dumps as json_dumps
 from logging import getLogger, DEBUG
+from os import environ
+from passlib.hash import pbkdf2_sha256
+from passlib.pwd import genphrase
 import requests
 from uuid import uuid4
 
@@ -54,6 +57,7 @@ def lambda_handler(event, context):
     print("Result: %d %s" % (r.status_code, r.reason))
     return
 
+
 def api_gateway_binary(event):
     if event["RequestType"] not in ("Create", "Update"):
         return
@@ -72,6 +76,32 @@ def api_gateway_binary(event):
 
     return
 
+
+def generate_password(event):
+    if event["RequestType"] not in ("Create", "Update"):
+        return
+
+    parameter_name = event["ResourceProperties"]["ParameterName"]
+
+    ddb_table_prefix = environ.get("DYNAMODB_TABLE_PREFIX", "Rolemaker.")
+    ddb = boto3.resource("dynamodb")
+    ddb_parameters = ddb.Table(ddb_table_prefix + "Parameters")
+
+    password = genphrase(entropy="secure", wordset="bip39")
+
+    # Write this to DynamoDB, hashed.
+    hashed_password = pbkdf2_sha256.hash(password)
+
+    ddb_parameters.update_item(
+        Key={"Name": parameter_name},
+        UpdateExpression="SET #V = :hash",
+        ExpressionAttributeNames={"#V": "Value"},
+        ExpressionAttributeValues={":hash": hashed_password}
+    )
+    return {"Password": password}
+
+
 handlers = {
     "Custom::ApiGatewayBinary": api_gateway_binary,
+    "Custom::GeneratePassword": generate_password,
 }

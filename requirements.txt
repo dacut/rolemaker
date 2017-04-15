@@ -1,5 +1,6 @@
 boto3
 flask
+passlib
 python-saml
 requests
 six
