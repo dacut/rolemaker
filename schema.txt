@@ -6,13 +6,17 @@ Parameters:
     Name: string, hash key; the name of a parameter
     Value: any; the value of that parameter
 
-    Known parameters:
+    Valid parameters:
+        SecretKey: the secret key for Flask sessions
         SessionLifetime: lifetime, in seconds, before we re-require SAML auth.
         InitialPasswordHash: hash of the initial password used to manage the system.
+
 Accounts:
     Accounts managed by Rolemaker
 
     AWSAccountId: string, hash key; 12 digit account number with no dashes.
+    AWSPartition: string; "aws" or "aws-us-gov"
+
     RequiredPolicies: list of string; each string is an ARN for a policy to
         attach to each IAM user, group, and role.
     RequiredGroupPolicies: list of string; each string is an ARN for a policy

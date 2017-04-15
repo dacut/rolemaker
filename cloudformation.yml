@@ -5,6 +5,10 @@ Parameters:
     Type: String
     Description: The prefix to attach to all DynamoDB tables.
     Default: Rolemaker.
+  AssetsBucket:
+    Type: String
+    Description: The S3 bucket containing static assets.
+    Default: cuthbert-rolemaker-static
 Resources:
   ParameterTable:
     Type: AWS::DynamoDB::Table
@@ -58,7 +62,7 @@ Resources:
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: !Ref DynamoDBTablePrefix
-      Handler: rolemaker.lambda_handler
+      Handler: handler.lambda_handler
       MemorySize: 512
       Role: !GetAtt LambdaApiRole.Arn
       Runtime: python2.7
@@ -76,6 +80,13 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Path: "/"
       Policies:
+        - PolicyName: "ApiGW"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: apigateway:*
+                Resource: !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/${RestApi}"
         - PolicyName: "DynamoDB"
           PolicyDocument:
             Version: "2012-10-17"
@@ -106,6 +117,11 @@ Resources:
     Properties:
       Description: !Ref AWS::StackName
       Name: !Ref AWS::StackName
+  RestApiBinary:
+    Type: Custom::ApiGatewayBinary
+    Properties:
+      ServiceToken: !GetAtt ApiFunction.Arn
+      RestApiId: !Ref RestApi
   ProxyPath:
     Type: AWS::ApiGateway::Resource
     Properties:
