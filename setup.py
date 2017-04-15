@@ -15,7 +15,7 @@ for pkg in search_packages:
         path = path[len(pkg) + 1:]
         if path:
             path += "/"
-            
+
         webfiles.extend([path + f for f in files
                          if not f.endswith("~") and not f.startswith(".#")])
 
@@ -23,17 +23,7 @@ setup(
     name="rolemaker",
     version="0.2",
     packages=['rolemaker'],
-    package_data={'rolemaker': webfiles,},
-    data_files=[("/usr/local/libexec/rolemaker", ["rolemaker.wsgi"])],
-    entry_points={
-        "console_scripts": [
-            "rolemaker-create-key=rolemaker.createkey:run_createkey",
-            "rolemaker-daemon=rolemaker.daemon:run_daemon",
-            "rolemaker-server=rolemaker.server:run_server",
-        ]
-    },
-    install_requires=["boto>=2.0", "daemonize>=2.4", "Flask>=0.10",
-                      "mako>=1.0"],
+    install_requires=["boto3", "Flask", "python-saml", "six"],
     setup_requires=["nose>=1.0"],
 
     # PyPI information
