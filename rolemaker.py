@@ -23,3 +23,8 @@ app = Flask(__name__)
 @app.route("/index.html", methods=["GET", "HEAD"])
 def get_index():
     return render_template("index.html")
+
+@app.route("/admin/", methods=["GET", "HEAD"])
+@app.route("/admin/index.html", methods=["GET", "HEAD"])
+def get_admin_index():
+    return render_template("admin/index.html")
