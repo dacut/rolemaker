@@ -214,6 +214,7 @@ Resources:
     DependsOn:
       - RootMethods
       - ProxyMethods
+      - RestApiBinary
     Properties:
       Description: !Ref AWS::StackName
       RestApiId: !Ref RestApi
