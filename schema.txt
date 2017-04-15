@@ -1,0 +1,64 @@
+This describes the DynamoDB schema for Rolemaker. All table names may be
+prefixed.
+
+Parameters:
+    System parameters for Rolemaker.
+    Name: string, hash key; the name of a parameter
+    Value: any; the value of that parameter
+
+    Known parameters:
+        SessionLifetime: lifetime, in seconds, before we re-require SAML auth.
+        InitialPasswordHash: hash of the initial password used to manage the system.
+Accounts:
+    Accounts managed by Rolemaker
+
+    AWSAccountId: string, hash key; 12 digit account number with no dashes.
+    RequiredPolicies: list of string; each string is an ARN for a policy to
+        attach to each IAM user, group, and role.
+    RequiredGroupPolicies: list of string; each string is an ARN for a policy
+        to attach to each IAM group.
+    RequiredRolePolicies: list of string; each string is an ARN for a policy
+        to attach to each IAM role.
+    RequiredUserPolicies: list of string; each string is an ARN for a policy
+        to attach to each IAM user.
+
+    RequiredInlinePolicies: list of string; each string is an inline policy
+        to attach to each IAM user, group, and role.
+    RequiredInlineGroupPolicies: list of string; each string is an inline policy
+        to attach to each IAM group.
+    RequiredInlineRolePolicies: list of string; each string is an inline policy
+        to attach to each IAM role.
+    RequiredInlineUserPolicies: list of string; each string is an inline policy
+        to attach to each IAM user.
+
+    Then one of the following sets of attributes:
+        AccessKey: string, no encoding
+        SecretKey: string, no encoding
+
+        RoleName: string
+        ExternalId: string
+
+Groups:
+    Active Directory/LDAP group policies.
+
+    GroupId: string, hash key; the name of the group sent over SAML.
+    AWSAccountId: string, range key; the AWS account this group is allowed to
+        manage.
+
+    RequiredPolicies: list of string; each string is an ARN for a policy to
+        attach to each IAM user, group, and role created by this AD/LDAP group.
+    RequiredGroupPolicies: list of string; each string is an ARN for a policy
+        to attach to each IAM group created by this AD/LDAP group.
+    RequiredRolePolicies: list of string; each string is an ARN for a policy
+        to attach to each IAM role created by this AD/LDAP group.
+    RequiredUserPolicies: list of string; each string is an ARN for a policy
+        to attach to each IAM user created by this AD/LDAP group.
+
+    RequiredInlinePolicies: list of string; each string is an inline policy
+        to attach to each IAM user, group, and role created by this AD/LDAP group.
+    RequiredInlineGroupPolicies: list of string; each string is an inline policy
+        to attach to each IAM group created by this AD/LDAP group.
+    RequiredInlineRolePolicies: list of string; each string is an inline policy
+        to attach to each IAM role created by this AD/LDAP group.
+    RequiredInlineUserPolicies: list of string; each string is an inline policy
+        to attach to each IAM user created by this AD/LDAP group.
