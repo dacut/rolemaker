@@ -12,12 +12,12 @@
     <title>{% block title %}Rolemaker{% endblock %}</title>
 
     <!-- Bootstrap core CSS -->
-    <link href="css/bootstrap.min.css" rel="stylesheet">
+    <link href='{{ url_for("static", filename="css/bootstrap.min.css") }}' rel="stylesheet">
     <!-- Custom styles for this template -->
-    <link href="css/rolemaker.css" rel="stylesheet">
+    <link href='{{ url_for("static", filename="css/rolemaker.css") }}' rel="stylesheet">
 
     <!-- Angular -->
-    <script src="js/angular.min.js"></script>
+    <script src="{{ url_for("static", filename="js/angular.min.js") }}"></script>
 
     <!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
     <!--[if lt IE 9]>
@@ -38,14 +38,14 @@
             <span class="icon-bar"></span>
             <span class="icon-bar"></span>
           </button>
-          <a class="navbar-brand rolemaker" href="#"><img alt="" src="images/blank.png" width="200px" height="30px"></a>
+          <a class="navbar-brand rolemaker" href='{{url_for("get_index") }}'><img alt='{{ getattr(parameters, "BrandImageAlt", "") }}' src='{{ getattr(parameters, "BrandImageURL", url_for("static", filename="images/blank.png")) }}' width='{{ getattr(parameters, "BrandImageWidth", "0px") }}' height='{{ getattr(parameters, "BrandImageHeight", "0px") }}'></a>
         </div>
         <div id="navbar" class="navbar-collapse collapse">
           <ul class="nav navbar-nav">
-            <li class="{% block navbar_home_class %}{% endblock %}"><a href="/index.html">Rolemaker</a></li>
-            <li class="{% block navbar_admin_class %}{% endblock %}"><a href="/admin/index.html">Admin</a></li>
+            <li class="{% block navbar_home_class %}{% endblock %}"><a href='{{ url_for("get_index") }}'>Rolemaker</a></li>
+            <li class="{% block navbar_admin_class %}{% endblock %}"><a href='{{ url_for("get_admin_index") }}'>Admin</a></li>
           </ul>
-        </div><!--/.nav-collapse -->
+        </div>
       </div>
     </nav>
     {% endblock %}
@@ -53,8 +53,8 @@
     {% endblock %}
     {% block footer %}
     <!-- Bootstrap; requires jQuery -->
-    <script src="js/jquery.min.js"></script>
-    <script src="js/bootstrap.min.js"></script>
+    <script src='{{ url_for("static", filename="js/jquery.min.js") }}'></script>
+    <script src='{{ url_for("static", filename="js/bootstrap.min.js") }}'></script>
     {% endblock %}
   </body>
 </html>
