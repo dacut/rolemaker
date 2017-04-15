@@ -10,6 +10,34 @@ Parameters:
     Description: The S3 bucket containing static assets.
     Default: cuthbert-rolemaker-static
 Resources:
+  EncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Ref AWS::StackName
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: key-default-1
+        Statement:
+          - Sid: Allow key administration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "kms:*"
+            Resource: "*"
+          - Sid: Allow encryption/decryption
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaApiRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - "kms:ReEncrypt*"
+            Resource: "*"
   ParameterTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -62,6 +90,7 @@ Resources:
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: !Ref DynamoDBTablePrefix
+          ENCRYPTION_KEY_ID: !Ref EncryptionKey
       Handler: handler.lambda_handler
       MemorySize: 512
       Role: !GetAtt LambdaApiRole.Arn
