@@ -1,0 +1,41 @@
+{% extends "frame.html" %}
+{% set username = session.username %}
+{% set is_admin = session.is_admin %}
+{% set admin_pw_hash = getattr(parameters, "AdminPasswordHash", None) %}
+{% block navbar_admin_class %}active{% endblock %}
+{% block page_content %}
+<div class="container">
+  <div class="row">
+  <div class="col-md-12 col-sm-12">
+{% if username and is_admin %}
+    <h2>Administrator Portal</h2>
+{% elif admin_pw_hash and is_admin %}
+    <h2>Initial Configuration</h2>
+{% elif admin_pw_hash %}
+    <h2>Administrator Login</h2>
+    <p>This Rolemaker deployment has not been configured. Use the administrator password
+    from your CloudFormation stack output to log in.</p>
+
+    <form method="POST" action="/admin" class="form-horizontal">
+      <div class="form-group">
+        <input type="hidden" name="action" value="initial-admin-login">
+        {{ xsrf() }}
+        <div class="col-sm-2">
+          <label for="password">Password</label>
+        </div>
+        <div class="col-sm-6">
+          <input type="password" name="password" class="form-control">
+        </div>
+      </div>
+    </form>
+  </div>
+{% else %}
+  <h2>Administrator Login Unavailable</h2>
+  <p>This Rolemaker deployment has already been configured. Log in from your SAML
+    application.
+  </p>
+{% endif %}
+  </div>
+</div>
+</div>
+{% endblock page_content %}

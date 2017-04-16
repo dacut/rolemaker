@@ -1,3 +1,16 @@
+{% macro closebutton() -%}
+<button type="button" class="close" data-dismiss="alert" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+{%- endmacro -%}
+{% macro show_flashed_messages(category_filter, css_class="") -%}
+{% for message in get_flashed_messages(category_filter=category_filter) %}
+<div class="alert {{css_class}} alert-dismissable" role="alert">
+  {{closebutton() | safe}}{{message | safe}}
+</div>
+{% endfor %}
+{%- endmacro -%}
+{%- macro xsrf() -%}
+<input type="hidden" name="xsrf" value="{{ get_xsrf_token() }}">
+{%- endmacro -%}
 <!DOCTYPE html>
 <html lang="en" ng-app="rolemaker">
   <head>
@@ -15,9 +28,6 @@
     <link href='{{ url_for("static", filename="css/bootstrap.min.css") }}' rel="stylesheet">
     <!-- Custom styles for this template -->
     <link href='{{ url_for("static", filename="css/rolemaker.css") }}' rel="stylesheet">
-
-    <!-- Angular -->
-    <script src="{{ url_for("static", filename="js/angular.min.js") }}"></script>
 
     <!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
     <!--[if lt IE 9]>
@@ -49,8 +59,15 @@
       </div>
     </nav>
     {% endblock %}
-    {% block page_content %}
-    {% endblock %}
+    <div class="container after-navbar">
+      {% block error_container -%}
+      {{ show_flashed_messages(category_filter=["error"], css_class="alert-danger") }}
+      {{ show_flashed_messages(category_filter=["warning"], css_class="alert-warning") }}
+      {{ show_flashed_messages(category_filter=["info"], css_class="alert-info") }}
+      {{ show_flashed_messages(category_filter=["success"], css_class="alert-success") }}
+      {%- endblock %}
+      {% block page_content %}{% endblock %}
+    </div>
     {% block footer %}
     <!-- Bootstrap; requires jQuery -->
     <script src='{{ url_for("static", filename="js/jquery.min.js") }}'></script>

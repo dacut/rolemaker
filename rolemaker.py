@@ -3,14 +3,17 @@ from __future__ import absolute_import, print_function
 from base64 import b64decode, b64encode
 import boto3
 from botocore.exceptions import ClientError
-from flask import Flask, render_template, url_for
+from flask import (
+    flash, Flask, make_response, render_template, request, session, url_for
+)
 from json import dumps as json_dumps
 from os import environ, urandom
 from logging import DEBUG, getLogger, INFO
+from passlib.hash import pbkdf2_sha256
 import requests
 from six.moves.http_client import (
-    BAD_GATEWAY, BAD_REQUEST, INTERNAL_SERVER_ERROR, NOT_FOUND, OK,
-    responses as http_responses
+    BAD_GATEWAY, BAD_REQUEST, FORBIDDEN, INTERNAL_SERVER_ERROR, NOT_FOUND, OK,
+    UNAUTHORIZED
 )
 from time import time
 from uuid import uuid4
@@ -29,6 +32,8 @@ ddb_groups = ddb.Table(ddb_table_prefix + "Groups")
 kms = boto3.client("kms")
 
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 5
 
 def get_secret_key():
     enc_context = {"KeyType": "FlaskSecretKey"}
@@ -93,19 +98,60 @@ class Parameters(object):
     def refresh_needed(self):
         return time() > self._next_refresh_time
 
+
+def get_xsrf_token():
+    if "xsrf_token" not in session:
+        session["xsrf_token"] = b64encode(urandom(18))
+
+    return session["xsrf_token"]
+
+
+def xsrf_ok():
+    form_xsrf = request.form.get("xsrf")
+    session_xsrf = get_xsrf_token()
+    return form_xsrf == session_xsrf
+
+
 parameters = Parameters()
 app.jinja_env.globals["parameters"] = parameters
 app.jinja_env.globals["getattr"] = getattr
+app.jinja_env.globals["session"] = session
+app.jinja_env.globals["get_xsrf_token"] = get_xsrf_token
 
 
 @app.route("/", methods=["GET", "HEAD"])
-@app.route("/index.html", methods=["GET", "HEAD"])
 def get_index():
     parameters.refresh_if_needed()
     return render_template("index.html", url_for=url_for)
 
-@app.route("/admin/", methods=["GET", "HEAD"])
-@app.route("/admin/index.html", methods=["GET", "HEAD"])
+
+@app.route("/admin", methods=["GET", "HEAD"])
 def get_admin_index():
     parameters.refresh_if_needed()
     return render_template("admin/index.html")
+
+
+@app.route("/admin", methods=["POST"])
+def post_admin_index():
+    parameters.refresh()
+    password_hash = getattr(parameters, "AdminPasswordHash", None)
+    password = request.form.get("password")
+
+    if not xsrf_ok():
+        flash("Form expired. Please try again.", category="error")
+        status = BAD_REQUEST
+    elif not password:
+        flash("Password cannot be empty.", category="error")
+        status = UNAUTHORIZED
+    elif not password_hash:
+        flash("This Rolemaker deployment has already been configured.",
+              category="error")
+        status = FORBIDDEN
+    elif pbkdf2_sha256.verify(password, password_hash):
+        session.is_admin = True
+        status = OK
+    else:
+        flash("Incorrect password.", category="error")
+        status = UNAUTHORIZED
+
+    return make_response(render_template("admin/index.html"), status)
