@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 from __future__ import absolute_import, print_function
+from base64 import b64decode, b64encode
 import boto3
+from botocore.exceptions import ClientError
 from flask import Flask, render_template, url_for
 from json import dumps as json_dumps
-from os import environ
+from os import environ, urandom
 from logging import DEBUG, getLogger, INFO
 import requests
 from six.moves.http_client import (
@@ -18,12 +20,51 @@ getLogger("botocore").setLevel(INFO)
 getLogger("boto3").setLevel(INFO)
 
 ddb_table_prefix = environ.get("DYNAMODB_TABLE_PREFIX", "Rolemaker.")
+encryption_key_id = environ.get("ENCRYPTION_KEY_ID", "")
 ddb = boto3.resource("dynamodb")
 ddb_parameters = ddb.Table(ddb_table_prefix + "Parameters")
 ddb_accounts = ddb.Table(ddb_table_prefix + "Accounts")
 ddb_groups = ddb.Table(ddb_table_prefix + "Groups")
 
+kms = boto3.client("kms")
+
 app = Flask(__name__)
+
+def get_secret_key():
+    enc_context = {"KeyType": "FlaskSecretKey"}
+
+    while True:
+        result = ddb_parameters.get_item(
+            Key={"Name": "SecretKey"}, ConsistentRead=True)
+        item = result.get("Item")
+        if item is not None:
+            return kms.decrypt(
+                CiphertextBlob=b64decode(item["Value"]),
+                EncryptionContext=enc_context)["Plaintext"]
+
+        # No secret key available -- generate one, but don't replace one if
+        # we encounter a race with another thread.
+        secret_key = urandom(16)
+        encrypt_response = kms.encrypt(
+            KeyId=encryption_key_id, Plaintext=secret_key,
+            EncryptionContext=enc_context)
+        ciphertext_blob = b64encode(encrypt_response["CiphertextBlob"])
+
+        try:
+            ddb_parameters.put_item(
+                Item={"Name": "SecretKey", "Value": ciphertext_blob},
+                Expected={"Name": {"Exists": False}})
+            return secret_key
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code != "ConditionalCheckFailedException":
+                raise
+
+        # Try again -- someone else beat us here.
+        continue
+
+app.secret_key = get_secret_key()
+
 
 class Parameters(object):
     """

@@ -7,7 +7,7 @@ Parameters:
     Value: any; the value of that parameter
 
     Valid parameters:
-        SecretKey: the secret key for Flask sessions
+        SecretKey: the secret key for Flask sessions (encrypted)
         SessionLifetime: lifetime, in seconds, before we re-require SAML auth.
         AdminPasswordHash: hash of the initial password used to manage the system.
 
