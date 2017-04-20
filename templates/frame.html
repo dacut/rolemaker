@@ -4,12 +4,24 @@
 {% macro show_flashed_messages(category_filter, css_class="") -%}
 {% for message in get_flashed_messages(category_filter=category_filter) %}
 <div class="alert {{css_class}} alert-dismissable" role="alert">
-  {{closebutton() | safe}}{{message | safe}}
+  {{closebutton()|safe}}{{message|safe}}
 </div>
 {% endfor %}
 {%- endmacro -%}
 {%- macro xsrf() -%}
 <input type="hidden" name="xsrf" value="{{ get_xsrf_token() }}">
+{%- endmacro -%}
+{%- macro form_input(name, label, value, placeholder, type="text", hint="") -%}
+<div class="form-group">
+  <label for="{{name}}" id="label-{{name}}">{{label}}</label>
+  <input type="{{type}}" name="{{name}}" id="input-{{name}}" class="form-control" placeholder="{{placeholder}}" value="{{value}}">
+  {% if hint %}
+  <small>{{hint|safe}}</small>
+  {% endif %}
+</div>
+{%- endmacro -%}
+{%- macro form_submit(name="submit", label="Submit") -%}
+<button class="btn btn-primary" name="{{name}}">{{label|safe}}</button>
 {%- endmacro -%}
 <!DOCTYPE html>
 <html lang="en" ng-app="rolemaker">

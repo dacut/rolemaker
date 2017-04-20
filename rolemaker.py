@@ -4,13 +4,16 @@ from base64 import b64decode, b64encode
 import boto3
 from botocore.exceptions import ClientError
 from flask import (
-    flash, Flask, make_response, render_template, request, session, url_for
+    flash, Flask, make_response, redirect, render_template, request, session,
+    url_for
 )
 from json import dumps as json_dumps
 from os import environ, urandom
 from logging import DEBUG, getLogger, INFO
+from markupsafe import escape as escape_html
 from passlib.hash import pbkdf2_sha256
 import requests
+from requests.exceptions import RequestException
 from six.moves.http_client import (
     BAD_GATEWAY, BAD_REQUEST, FORBIDDEN, INTERNAL_SERVER_ERROR, NOT_FOUND, OK,
     UNAUTHORIZED
@@ -81,12 +84,14 @@ class Parameters(object):
     def __init__(self):
         super(Parameters, self).__init__()
         self._next_refresh_time = 0
+        self._items = {}
         self.refresh()
         return
 
     def refresh(self):
-        for item in ddb_parameters.scan().get("Items", []):
-            setattr(self, item["Name"], item["Value"])
+        self._items = {}
+        for item in ddb_parameters.scan(ConsistentRead=True).get("Items", []):
+            self._items[item["Name"]] = item["Value"]
         self._next_refresh_time = time() + self.cache_time
         return
 
@@ -98,10 +103,30 @@ class Parameters(object):
     def refresh_needed(self):
         return time() > self._next_refresh_time
 
+    def __getitem__(self, name):
+        return self._items.get(name, "")
+
+    def __setitem__(self, name, value):
+        if not session.get("is_admin"):
+            return
+
+        if not value:
+            del self[name]
+        else:
+            ddb_parameters.put_item(Item={"Name": name, "Value": value})
+            self._items[name] = value
+        return
+
+    def __delitem__(self, name):
+        ddb_parameters.delete_item(Key={"Name": name})
+        try: del self._items[name]
+        except KeyError: pass
+        return
+
 
 def get_xsrf_token():
     if "xsrf_token" not in session:
-        session["xsrf_token"] = b64encode(urandom(18))
+        session["xsrf_token"] = unicode(b64encode(urandom(18)))
 
     return session["xsrf_token"]
 
@@ -133,8 +158,19 @@ def get_admin_index():
 
 @app.route("/admin", methods=["POST"])
 def post_admin_index():
+    action = request.form.get("action")
+    if action == "initial-admin-login":
+        return initial_admin_login()
+    elif action == "site-config":
+        return site_config()
+
+    flash("Unknown form submitted.", category="error")
+    return make_response(render_template("admin/index.html"), BAD_REQUEST)
+
+
+def initial_admin_login():
     parameters.refresh()
-    password_hash = getattr(parameters, "AdminPasswordHash", None)
+    password_hash = parameters["AdminPasswordHash"]
     password = request.form.get("password")
 
     if not xsrf_ok():
@@ -148,10 +184,47 @@ def post_admin_index():
               category="error")
         status = FORBIDDEN
     elif pbkdf2_sha256.verify(password, password_hash):
-        session.is_admin = True
+        session["is_admin"] = True
         status = OK
     else:
         flash("Incorrect password.", category="error")
         status = UNAUTHORIZED
 
     return make_response(render_template("admin/index.html"), status)
+
+
+def site_config():
+    parameters.refresh_if_needed()
+    site_dns = request.form.get("site-dns", "")
+    saml_metadata_url = request.form.get("saml-metadata-url", "")
+    errors = []
+
+    if saml_metadata_url != parameters["SAMLMetadataURL"]:
+        try:
+            r = requests.get(saml_metadata_url)
+            if r.status_code != OK:
+                errors.append(
+                    "Unable to read SAML metadata from %s: HTTP error %s: %s" %
+                    (escape_html(saml_metadata_url),
+                     escape_html(str(r.status_code)),
+                     escape_html(str(r.reason))))
+        except RequestException as e:
+            errors.append(
+                "Unable to read SAML metadata from %s: %s" %
+                (escape_html(saml_metadata_url), escape_html(str(e))))
+
+    if not errors:
+        parameters["SiteDNS"] = site_dns
+        parameters["SAMLMetadataURL"] = saml_metadata_url
+        flash("Site configuration updated", category="info")
+    else:
+        for error in errors:
+            flash(error, category="error")
+
+    return redirect(url_for("get_admin_index"))
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("get_index"))
