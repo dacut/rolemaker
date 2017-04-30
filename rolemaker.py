@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-from __future__ import absolute_import, print_function
+#!/usr/bin/env python3
 from base64 import b64decode, b64encode
 import boto3
 from botocore.exceptions import ClientError
@@ -16,11 +15,15 @@ from cryptography.x509.oid import NameOID
 from datetime import datetime, timedelta
 from flask import (
     flash, Flask, make_response, redirect, render_template, request, session,
-    url_for
+    url_for as flask_url_for
+)
+from http.client import (
+    BAD_GATEWAY, BAD_REQUEST, FORBIDDEN, INTERNAL_SERVER_ERROR, NOT_FOUND, OK,
+    SERVICE_UNAVAILABLE, UNAUTHORIZED
 )
 from json import dumps as json_dumps
 from os import environ, urandom
-from logging import basicConfig as config_logging, DEBUG, getLogger, INFO
+from logging import DEBUG, Formatter, getLogger, INFO, StreamHandler
 from markupsafe import escape as escape_html
 from passlib.hash import pbkdf2_sha256
 import requests
@@ -28,15 +31,27 @@ from requests.exceptions import RequestException
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
 from saml2.client import Saml2Client
 from saml2.config import Config as Saml2Config
-from six import iteritems, text_type
-from six.moves.http_client import (
-    BAD_GATEWAY, BAD_REQUEST, FORBIDDEN, INTERNAL_SERVER_ERROR, NOT_FOUND, OK,
-    SERVICE_UNAVAILABLE, UNAUTHORIZED
-)
-from six.moves.urllib.parse import unquote as url_unquote
 from sys import stderr
-from time import time
+from time import gmtime, time
+from urllib.parse import unquote as url_unquote
 from uuid import uuid4
+
+# Configure application logging early on.
+rootLogger = getLogger()
+log = getLogger("rolemaker")
+rootLogger.setLevel(DEBUG)
+handler = StreamHandler(stderr)
+formatter = Formatter("%(asctime)s %(filename)s:%(lineno)s %(name)s %(levelname)s: %(message)s")
+formatter.default_time_format = "%Y-%m-%dT%H:%M:%S"
+formatter.default_msec_format = "%s.%03dZ"
+formatter.converter = gmtime
+handler.setFormatter(formatter)
+rootLogger.addHandler(handler)
+log.info("Starting initialization")
+
+# Force URL rewrites to use https
+def url_for(*args, **kw):
+    return flask_url_for(*args, _scheme="https", _external="True", **kw)
 
 # Make Boto quieter
 getLogger("botocore").setLevel(INFO)
@@ -57,7 +72,7 @@ kms = boto3.client("kms")
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 5
-log = app.logger
+app.config["DEBUG"] = True
 
 # X509 relative distinguished name (RDN) and shortcuts.
 x509_rdn = {
@@ -205,7 +220,7 @@ def get_xsrf_token():
     session, generating it and setting it in the session cookie if necessary.
     """
     if "xsrf_token" not in session:
-        session["xsrf_token"] = unicode(b64encode(urandom(18)))
+        session["xsrf_token"] = str(b64encode(urandom(18)))
 
     return session["xsrf_token"]
 
@@ -395,8 +410,8 @@ def generate_sp_certificate(expected=None):
     ddb_parameters.put_item(
         Item={
             "Name": "SPCertificate",
-            "Value": text_type(certificate_pem),
-            "PrivateKey": text_type(ciphertext_blob),
+            "Value": str(certificate_pem),
+            "PrivateKey": str(ciphertext_blob),
         },
         **ddb_kw)
 
@@ -441,7 +456,7 @@ def update_site_config():
         updates["SiteDNS"] = site_dns
 
     if not errors:
-        for key, value in iteritems(updates):
+        for key, value in updates.items():
             parameters[key] = value
         flash("Site configuration updated", category="info")
     else:
@@ -485,7 +500,7 @@ def update_auth_config():
         updates["SPSubjectAlternativeNames"] = sp_subject_alternative_names
 
     if not errors:
-        for key, value in iteritems(updates):
+        for key, value in updates.items():
             parameters[key] = value
 
         # Force a certificate renewal if we've updated the certificate subject.
