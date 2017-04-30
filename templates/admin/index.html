@@ -18,10 +18,29 @@
             {{ form_input("site-dns", "DNS name", parameters["SiteDNS"],
                           placeholder="rolemaker.example.com",
                           hint="The hostname of this Rolemaker installation") }}
-            {{ form_input("saml-metadata-url", "SAML IdP metadata URL", parameters["SAMLMetadataURL"],
+            {{ form_submit() }}
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="panel panel-default">
+      <div class="panel-heading">Authentication Configuration</div>
+      <div class="panel-body">
+        <form method="POST" action="/admin">
+          <div class="form-group">
+            <input type="hidden" name="action" value="auth-config">
+            {{ form_input("idp-metadata-url", "SAML IdP metadata URL", parameters["IdPMetadataURL"],
                           placeholder="https://hostname/FederationMetadata/2007-06/FederationMetadata.xml",
                           hint="The URL for your SAML identity provider. For Active Directory Federation Services, this is usually "
                                "https://<i>hostname</i>/FederationMetadata/2007-06/FederationMetadata.xml") }}
+            {{ form_input("sp-certificate-subject", "SAML SP certificate subject", parameters["SPSubject"],
+                          placeholder="CN=host.domain,O=Organization Name,ST=Full state or province,C=Country code",
+                          hint="The subject for the SAML service provider certificate used by Rolemaker. For example: "
+                               "<code>CN=rolemaker.example.nz,OU=Information Technology,O=Example Company,L=Christchurch,"
+                               "ST=Canterbury,C=NZ</code>") }}
+            {{ form_input("sp-subject-alternative-names", "SAML SP subject alternative names", parameters["SPSubjectAlternativeNames"],
+                          placeholder="host1.domain,host2.domain",
+                          hint="Subject alternative names for the SAML service provider certificate used by Rolemaker.") }}
             {{ form_submit() }}
           </div>
         </form>

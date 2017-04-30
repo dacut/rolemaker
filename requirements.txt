@@ -1,7 +1,8 @@
 boto3
+cryptography
 flask
 passlib
-python-saml
+pysaml2
 requests
 six
 zappa

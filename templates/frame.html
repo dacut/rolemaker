@@ -72,13 +72,13 @@
     </nav>
     {% endblock %}
     <div class="container after-navbar">
-      {% block error_container -%}
-      {{ show_flashed_messages(category_filter=["error"], css_class="alert-danger") }}
-      {{ show_flashed_messages(category_filter=["warning"], css_class="alert-warning") }}
-      {{ show_flashed_messages(category_filter=["info"], css_class="alert-info") }}
-      {{ show_flashed_messages(category_filter=["success"], css_class="alert-success") }}
-      {%- endblock %}
-      {% block page_content %}{% endblock %}
+      {%- block error_container -%}
+      {{- show_flashed_messages(category_filter=["error"], css_class="alert-danger") -}}
+      {{- show_flashed_messages(category_filter=["warning"], css_class="alert-warning") -}}
+      {{- show_flashed_messages(category_filter=["info"], css_class="alert-info") -}}
+      {{- show_flashed_messages(category_filter=["success"], css_class="alert-success") -}}
+      {%- endblock -%}
+      {%- block page_content -%}{%- endblock %}
     </div>
     {% block footer %}
     <!-- Bootstrap; requires jQuery -->
