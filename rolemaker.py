@@ -49,13 +49,17 @@ handler.setFormatter(formatter)
 rootLogger.addHandler(handler)
 log.info("Starting initialization")
 
+
 # Force URL rewrites to use https
 def url_for(*args, **kw):
     return flask_url_for(*args, _scheme="https", _external="True", **kw)
 
-# Make Boto quieter
+
+# Make Boto and PySAML quieter
 getLogger("botocore").setLevel(INFO)
 getLogger("boto3").setLevel(INFO)
+getLogger("saml2").setLevel(INFO)
+
 
 # DynamoDB handles
 ddb_table_prefix = environ.get("DYNAMODB_TABLE_PREFIX", "Rolemaker.")
@@ -112,6 +116,12 @@ x509_rdn = {
     "UID": NameOID.USER_ID,
     "DC": NameOID.DOMAIN_COMPONENT,
 }
+
+
+# SAML attribute keys
+saml_attribute_prefix = "https://github.com/dacut/rolemaker/SAML/Attributes/"
+saml_username = saml_attribute_prefix + "Username"
+saml_groups = saml_attribute_prefix + "Groups"
 
 
 def get_secret_key():
@@ -410,8 +420,8 @@ def generate_sp_certificate(expected=None):
     ddb_parameters.put_item(
         Item={
             "Name": "SPCertificate",
-            "Value": str(certificate_pem),
-            "PrivateKey": str(ciphertext_blob),
+            "Value": str(certificate_pem, "utf-8"),
+            "PrivateKey": str(ciphertext_blob, "utf-8"),
         },
         **ddb_kw)
 
@@ -528,13 +538,14 @@ def get_idp_metadata(idp_metadata_url, errors):
 
 
 def get_saml_client():
-    acs_url = url_for("idp_initiated", _external=True)
-    https_acs_url = url_for("idp_initiated", _external=True, _scheme='https')
+    acs_url = url_for("idp_initiated")
+    https_acs_url = url_for("idp_initiated")
 
-    return {
+    settings = {
+        'accepted_time_diff': 60,
         'metadata': {
-            'inline': parameters["IdPMetadata"],
-            },
+            'inline': [parameters["IdPMetadata"]],
+        },
         'service': {
             'sp': {
                 'endpoints': {
@@ -558,6 +569,7 @@ def get_saml_client():
         },
     }
 
+    log.info("getting saml_config")
     spConfig = Saml2Config()
     spConfig.load(settings)
     spConfig.allow_unknown_attributes = True
@@ -566,8 +578,46 @@ def get_saml_client():
 
 
 @app.route("/saml/sso", methods=["POST"])
-def idp_initiated():
-    return None
+def idp_initiated(target="/"):
+    saml_response = request.form.get("SAMLResponse")
+    if saml_response is None:
+        return make_response(("", BAD_REQUEST, {"Content-Type": "text/plain"}))
+
+    try:
+        saml = get_saml_client()
+    except:
+        log.error("Failed to get SAML client", exc_info=True)
+        raise
+
+    assert isinstance(saml, Saml2Client)
+    log.info("saml=%s", saml)
+    authn_response = saml.parse_authn_request_response(
+        saml_response, BINDING_HTTP_POST)
+    ava = authn_response.get_identity()
+    log.debug("ava=%s", ava)
+    usernames = ava.get(saml_username, [])
+    if len(usernames) != 1:
+        log.error("Invalid usernames: %r", usernames)
+        return make_response((
+            "Invalid username specified", BAD_REQUEST,
+            {"Content-Type": "text/plain; charset=utf-8"}))
+
+    username = usernames[0]
+    groups = ava.get(saml_groups, [])
+
+    session.clear()
+    session["username"] = username
+    session["groups"] = groups
+    admin_groups = parameters.get("AdminGroups", [])
+
+    for group in groups:
+        if group in admin_groups:
+            session["is_admin"] = True
+            break
+    else:
+        session["is_admin"] = False
+
+    return(redirect(target))
 
 
 @app.route("/saml/metadata.xml", methods=["GET"])
@@ -583,7 +633,8 @@ def get_saml_metadata():
 
     cert = get_sp_certificate()[0]
     expiration = cert.not_valid_after.strftime("%Y-%m-%dT%H:%M:%SZ")
-    cert_pem_lines = cert.public_bytes(Encoding.PEM).strip().split("\n")
+    cert_pem = str(cert.public_bytes(Encoding.PEM), "utf-8")
+    cert_pem_lines = cert_pem.strip().split("\n")
     assert cert_pem_lines[0] == "-----BEGIN CERTIFICATE-----"
     assert cert_pem_lines[-1] == "-----END CERTIFICATE-----"
 
@@ -605,9 +656,8 @@ def get_saml_metadata():
     <AssertionConsumerService index="1" isDefault="true" Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://%(site_dns)s/saml/sso"/>
     <AttributeConsumingService index="1">
       <ServiceName xml:lang="en">Rolemaker Single Sign-On</ServiceName>
-      <RequestedAttribute isRequired="true" Name="https://github.com/dacut/rolemaker/SAML/Attributes/AWSAccountEntitlement" FriendlyName="AWSAccountEntitlement"/>
-      <RequestedAttribute isRequired="true" Name="https://github.com/dacut/rolemaker/SAML/Attributes/SessionName" FriendlyName="SessionName"/>
-      <RequestedAttribute isRequired="false" Name="https://github.com/dacut/rolemaker/SAML/Attributes/RolemakerEntitlement" FriendlyName="RolemakerEntitlement"/>
+      <RequestedAttribute isRequired="true" Name="https://github.com/dacut/rolemaker/SAML/Attributes/Groups" FriendlyName="Groups"/>
+      <RequestedAttribute isRequired="true" Name="https://github.com/dacut/rolemaker/SAML/Attributes/Username" FriendlyName="Username"/>
       <RequestedAttribute isRequired="false" Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.1" FriendlyName="eduPersonAffiliation"/>
       <RequestedAttribute isRequired="false" Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.2" FriendlyName="eduPersonNickname"/>
       <RequestedAttribute isRequired="false" Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.3" FriendlyName="eduPersonOrgDN"/>

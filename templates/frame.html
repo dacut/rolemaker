@@ -67,6 +67,17 @@
             <li class="{% block navbar_home_class %}{% endblock %}"><a href='{{ url_for("get_index") }}'>Rolemaker</a></li>
             <li class="{% block navbar_admin_class %}{% endblock %}"><a href='{{ url_for("get_admin_index") }}'>Admin</a></li>
           </ul>
+          <ul class="nav navbar-nav navbar-right">
+            <li class="navbar-right dropdown">
+              <a class="dropdown-toggle" data-toggle="dropdown" href="#" role="button" aria-haspopup="true" aria-expanded="false">
+                {{- session.get("username", "Not logged in") }}
+                <span class="caret"></span>
+              </a>
+              <ul class="dropdown-menu">
+                <li><a href='{{ url_for("logout") }}'>Logout</a></li>
+              </ul>
+            </li>
+          </ul>
         </div>
       </div>
     </nav>
