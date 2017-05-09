@@ -7,18 +7,6 @@ from setuptools import setup, Command
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger("nose").setLevel(logging.DEBUG)
 
-webfiles = []
-search_packages = ["rolemaker"]
-
-for pkg in search_packages:
-    for path, subdirs, files in walk(pkg):
-        path = path[len(pkg) + 1:]
-        if path:
-            path += "/"
-
-        webfiles.extend([path + f for f in files
-                         if not f.endswith("~") and not f.startswith(".#")])
-
 setup(
     name="rolemaker",
     version="0.2",

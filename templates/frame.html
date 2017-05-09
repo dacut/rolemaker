@@ -65,7 +65,7 @@
         <div id="navbar" class="navbar-collapse collapse">
           <ul class="nav navbar-nav">
             <li class="{% block navbar_home_class %}{% endblock %}"><a href='{{ url_for("get_index") }}'>Rolemaker</a></li>
-            <li class="{% block navbar_admin_class %}{% endblock %}"><a href='{{ url_for("get_admin_index") }}'>Admin</a></li>
+            <li class="{% block navbar_admin_class %}{% endblock %}"><a href='{{ url_for("admin.get_admin_index") }}'>Admin</a></li>
           </ul>
           <ul class="nav navbar-nav navbar-right">
             <li class="navbar-right dropdown">
