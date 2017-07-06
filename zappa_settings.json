@@ -1,7 +1,0 @@
-{
-    "prod": {
-        "app_function": "rolemaker.app",
-        "binary_support": true,
-        "s3_bucket": "cuthbert-usw2"
-    }
-}

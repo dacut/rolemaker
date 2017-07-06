@@ -1,9 +1,0 @@
-boto3
-cryptography
-flask
-frozendict
-passlib
-pysaml2
-requests
-six
-zappa
