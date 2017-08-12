@@ -3,12 +3,17 @@
 Simplified per-account Rolemaker installation using native AWS authentication
 and authorization.
 """
-# pylint: disable=C0103
-from logging import Formatter, getLogger, DEBUG, INFO
+# pylint: disable=C0103,C0302,C0326
+from abc import abstractmethod
+from base64 import b32encode
+from functools import wraps
+from http import HTTPStatus
 from http.client import HTTPResponse
 from json import dumps as json_dumps, loads as json_loads
-from os import environ
-from typing import Any, cast, Dict, Set
+from logging import Formatter, getLogger, DEBUG, INFO
+from os import environ, urandom
+from re import fullmatch
+from typing import Any, Callable, cast, Dict, List, NamedTuple, Optional, Set, Union
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -26,11 +31,8 @@ log.handlers[0].setFormatter(Formatter(
 getLogger("botocore").setLevel(INFO)
 getLogger("boto3").setLevel(INFO)
 
-# Handle to the IAM service.
-iam = boto3.client("iam")
-
 # This is a policy document that does not grant any permissions.
-ASSUME_ROLE_POLICY_NOOP = json_dumps({
+ASSUME_ROLE_POLICY_NOOP = {
     "Version": "2012-10-17",
     "Statement": [
         {
@@ -39,21 +41,421 @@ ASSUME_ROLE_POLICY_NOOP = json_dumps({
             "Principal": {"Service": "ec2.amazonaws.com"},
         }
     ]
-})
+}
 
-class RolemakerError(RuntimeError):
+def RolemakerError(
+        error_code: str, message: str, operation_name: str,
+        status_code: Union[int, HTTPStatus]=HTTPStatus.BAD_REQUEST) \
+        -> BotoClientError:
     """
-    Exception class signifying a user error in calling Rolemaker (vs. a bug
-    in Rolemaker) itself.
+    Create a BotoClientError exception from the specified fields.
     """
-    pass
+    return BotoClientError(
+        error_response={
+            "Error": {
+                "Code": error_code,
+                "Type": "Sender",
+                "Message": message,
+            },
+            "ResponseMetadata": {
+                "HTTPStatusCode": int(status_code),
+            }
+        },
+        operation_name=operation_name)
 
-class CustomResourceHandler(object):
+class APIInfo(NamedTuple):                              # pylint: disable=R0903
     """
-    Handle CloudFormation custom resource requests.
+    Parameter information about an API.
     """
+    method: Callable
+    parameters: Set[str]
+
+def api(api_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """
+    Decorator for Rolemaker APIs that sets metadata.
+    """
+    def decorate_function(f: Callable[..., Any]) -> Callable[..., Any]:
+        """
+        Decorate the passed function so the current api name is set.
+        """
+        @wraps(f)
+        def wrapper(*args, **kw):                       # pylint: disable=C0111
+            try:
+                return f(*args, **kw)
+            except BotoClientError as e:
+                # Reset the operation name. This requires reformatting the
+                # error message as well since it's set in the constructor.
+                e.operation_name = api_name
+                msg = e.MSG_TEMPLATE.format(
+                    error_code=e.response['Error'].get('Code', 'Unknown'),
+                    error_message=e.response['Error'].get('Message', 'Unknown'),
+                    operation_name=api_name,
+                    retry_info=e._get_retry_info(e.response), # pylint: disable=W0212
+                )
+                e.args = (msg,) + e.args[1:]
+                raise
+
+        code = f.__code__
+        first_kwarg = code.co_argcount
+        last_kwarg = first_kwarg + code.co_kwonlyargcount
+        params = set(code.co_varnames[first_kwarg:last_kwarg])
+
+        RolemakerAPI.apis[api_name] = APIInfo(method=wrapper, parameters=params)
+        return wrapper
+    return decorate_function
+
+def InvalidParameterValue(
+        message: str, operation_name: str="Unknown") -> BotoClientError:
+    """
+    Create a BotoClientError instance prepopulated with the
+    "InvalidParameterValue" error code.
+    """
+    return RolemakerError("InvalidParameterValue", message, operation_name)
+
+def DeleteConflict(
+        message: str, operation_name: str="Unknown") -> BotoClientError:
+    """
+    Create a BotoClientError instance prepopulated with the
+    "DeleteConflict" error code
+    """
+    return RolemakerError("DeleteConflict", message, operation_name)
+
+class RolemakerAPI(object):
+    """
+    Bare Rolemaker APIs.
+    """
+    # Handle to the IAM service.
+    iam = boto3.client("iam")
+    mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
+    apis = {}                                       # type: Dict[str, APIInfo]
+
+    @abstractmethod
+    def __call__(self) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError()
+
+    @api("CreateRestrictedRole")
+    def create_restricted_role(
+            self, *, RoleName: str="", AssumeRolePolicyDocument: str="",
+            Path: str="/", Description: str="") -> Dict[str, Any]:
+        """
+        Create a new restricted role.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        if not AssumeRolePolicyDocument:
+            raise InvalidParameterValue(
+                "AssumeRolePolicyDocument cannot be empty")
+
+        if not self.mandatory_policy_arn:
+            raise RuntimeError(
+                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
+                "has not been set on the Lambda function.")
+
+        role_info = self.iam.create_role(
+            RoleName=RoleName,
+            AssumeRolePolicyDocument=AssumeRolePolicyDocument, Path=Path,
+            Description=Description)
+
+        try:
+            self.iam.attach_role_policy(
+                RoleName=RoleName, PolicyArn=self.mandatory_policy_arn)
+        except Exception as e:
+            log.error("Failed to attach PolicyArn %s to role %s: %s",
+                      self.mandatory_policy_arn, RoleName, e, exc_info=True)
+            try:
+                log.info("Deleting role %s because policy attachment failed.",
+                         RoleName)
+                self.iam.delete_role(RoleName=RoleName)
+                log.info("Role %s deleted", RoleName)
+            except Exception as e2:
+                log.error("Failed to delete role %s: %s(%s)", RoleName,
+                          type(e2).__name__, e2, exc_info=True)
+                raise
+            raise
+        return role_info
+
+    @api("DeleteRestrictedRole")
+    def delete_restricted_role(self, *, RoleName: str="") -> None:
+        """
+        Delete an existing restricted role. This does not allow the deletion of
+        unrestricted roles; the role must have no inline policies attached to
+        it and only the mandatory policy attached to it.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        attached_policies = self.get_attached_policies_for_role(RoleName)
+        inline_policies = self.get_inline_policy_names_for_role(RoleName)
+
+        if not self.mandatory_policy_arn:
+            raise RuntimeError(
+                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
+                "has not been set on the Lambda function.")
+
+        if self.mandatory_policy_arn not in attached_policies:
+            raise InvalidParameterValue("Role %s is not a restricted role.")
+
+        if len(attached_policies) != 1:
+            raise DeleteConflict(
+                "Cannot delete entity, must detach all policies first.")
+
+        if inline_policies:
+            raise DeleteConflict(
+                "Cannot delete entity, must delete policies first.")
+
+        # Set the assume role document to an unusable value in case we are
+        # unable to delete the role.
+        self.iam.update_assume_role_policy(
+            RoleName=RoleName,
+            PolicyDocument=json_dumps(ASSUME_ROLE_POLICY_NOOP, indent=4))
+
+        # Remove the mandatory policy.
+        self.iam.detach_role_policy(
+            RoleName=RoleName, PolicyArn=self.mandatory_policy_arn)
+
+        # Now that the role is empty we can delete it.
+        return self.iam.delete_role(RoleName=RoleName)
+
+    @api("AttachRestrictedRolePolicy")
+    def attach_restricted_role_policy(
+            self, *, RoleName: str="", PolicyArn: str="") -> None:
+        """
+        Attach a managed policy to a restricted IAM role.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        if not PolicyArn:
+            raise InvalidParameterValue("PolicyArn cannot be empty")
+
+        self.assert_is_restricted_role(RoleName=RoleName)
+        return self.iam.attach_role_policy(
+            RoleName=RoleName, PolicyArn=PolicyArn)
+
+    @api("DetachedRestrictedRolePolicy")
+    def detach_restricted_role_policy(
+            self, *, RoleName: str="", PolicyArn: str="") -> None:
+        """
+        Detach a managed policy to a restricted IAM role.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        if not PolicyArn:
+            raise InvalidParameterValue("PolicyArn cannot be empty")
+
+        if not self.mandatory_policy_arn:
+            raise RuntimeError(
+                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
+                "has not been set on the Lambda function.")
+
+        if PolicyArn == self.mandatory_policy_arn:
+            raise InvalidParameterValue("Cannot detach the mandatory policy.")
+
+        self.assert_is_restricted_role(RoleName=RoleName)
+        return self.iam.detach_role_policy(
+            RoleName=RoleName, PolicyArn=PolicyArn)
+
+    @api("PutRestrictedRolPolicy")
+    def put_restricted_role_policy(
+            self, *, RoleName: str="", PolicyName: str="",
+            PolicyDocument: str="") -> None:
+        """
+        Adds or updates an inline policy to a restricted IAM role.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        if not PolicyName:
+            raise InvalidParameterValue("PolicyName cannot be empty")
+
+        if not PolicyDocument:
+            raise InvalidParameterValue("PolicyDocument cannot be empty")
+
+        self.assert_is_restricted_role(RoleName=RoleName)
+        return self.iam.put_role_policy(
+            RoleName=RoleName, PolicyName=PolicyName,
+            PolicyDocument=PolicyDocument)
+
+    @api("DeleteRestrictedRolePolicy")
+    def delete_restricted_role_policy(
+            self, *, RoleName: str="", PolicyName: str="") -> None:
+        """
+        Deletes an inline policy from a restricted IAM role.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        if not PolicyName:
+            raise InvalidParameterValue("PolicyName cannot be empty")
+
+        self.assert_is_restricted_role(RoleName=RoleName)
+        return self.iam.delete_role_policy(
+            RoleName=RoleName, PolicyName=PolicyName)
+
+    @api("UpdateAssumeRestrictedRolePolicy")
+    def update_assume_restricted_role_policy(
+            self, *, RoleName: str="", PolicyDocument: str="") -> None:
+        """
+        Updates the policy that grants an IAM entity permission to assume
+        a restricted role.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        if not PolicyDocument:
+            raise InvalidParameterValue("PolicyDocument cannot be empty")
+
+        self.assert_is_restricted_role(RoleName=RoleName)
+        return self.iam.update_assume_role_policy(
+            RoleName=RoleName, PolicyDocument=PolicyDocument)
+
+    @api("UpdateRestrictedRoleDescription")
+    def update_restricted_role_description(
+            self, *, RoleName: str="", Description: str="") -> None:
+        """
+        Modifies the description of a restricted role.
+        """
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        self.assert_is_restricted_role(RoleName=RoleName)
+        return self.iam.update_role_description(
+            RoleName=RoleName, Description=Description)
+
+    def assert_is_restricted_role(self, RoleName: str) -> None:
+        """
+        Verifies the specified role name is a restricted role by ensuring
+        the attached policies includes the mandatory policy ARN.
+        """
+        if not self.mandatory_policy_arn:
+            raise RuntimeError(
+                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
+                "has not been set on the Lambda function.")
+
+        if not RoleName:
+            raise InvalidParameterValue("RoleName cannot be empty.")
+
+        kw = {"RoleName": RoleName}
+        # We need to loop in case the results are paginated.
+        while True:
+            response = self.iam.list_attached_role_policies(**kw)
+            attached_policies = response.get("AttachedPolicies", [])
+            for policy in attached_policies:
+                if policy == self.mandatory_policy_arn:
+                    return
+
+            if not response["IsTruncated"]:
+                break
+
+            kw["Marker"] = response["Marker"]
+        raise InvalidParameterValue("Role %s is not a restricted role.")
+
+    def get_role_for_arn(self, role_arn: str) -> Dict[str, Any]:
+        """
+        get_role_for_arn(role_arn: str) -> Dict[str, Any]
+        Returns role information given an ARN. This also validates the ARN to
+        ensure it matches the ARN of the associated role name.
+        """
+        log.debug("role_arn=%r", role_arn)
+        try:
+            role_path = role_arn.rsplit(":", 1)[1]
+            log.debug("role_path=%r", role_path)
+
+            role_name = role_path.rsplit("/", 1)[1]
+            log.debug("role_name=%r", role_name)
+        except IndexError:
+            raise InvalidParameterValue(
+                "Invalid PhysicalResourceId: not a valid role ARN: %r" %
+                role_arn)
+
+        # Make sure the role ARN matches what we expect
+        try:
+            response = self.iam.get_role(RoleName=role_name)
+            role_info = response["Role"]
+            if role_info["Arn"] != role_arn:
+                raise InvalidParameterValue(
+                    "Invalid PhysicalResourceId: role %s has ARN %s which "
+                    "doesn't match PhysicalResourceId %s" %
+                    (role_name, role_info["Arn"], role_arn))
+        except BotoClientError as e:
+            log.error("Failed to get role %s (arn=%r): %s", role_name,
+                      role_arn, e, exc_info=True)
+            raise InvalidParameterValue(
+                "Invalid PhysicalResourceId: role %s (ARN %s) does not exist" %
+                (role_name, role_arn))
+
+        return role_info
+
+    def get_attached_policies_for_role(self, role_name: str) -> Set[str]:
+        """
+        Returns all attached policy ARNs for the given role.
+        """
+        kw = {"RoleName": role_name}
+        result = set()
+
+        # We need to loop in case the results are paginated.
+        while True:
+            response = self.iam.list_attached_role_policies(**kw)
+            attached_policies = response.get("AttachedPolicies", [])
+            for policy in attached_policies:
+                result.add(policy["PolicyArn"])
+
+            if not response["IsTruncated"]:
+                return result
+
+            kw["Marker"] = response["Marker"]
+
+    def get_inline_policy_names_for_role(self, role_name: str) -> Set[str]:
+        """
+        get_inline_policies_for_role(role_name: str) -> Set[str]
+        Returns the inline policies names for a given role.
+        """
+        kw = {"RoleName": role_name}
+        policy_names = set()                                       # type: Set[str]
+
+        # Undo the pagination.
+        while True:
+            response = self.iam.list_role_policies(**kw)
+            policy_names.update(response.get("PolicyNames", []))
+
+            if not response["IsTruncated"]:
+                return policy_names
+
+            kw["Marker"] = response["Marker"]
+
+    def get_inline_policies_for_role(
+            self, role_name: str) -> Dict[str, Dict[str, Any]]:
+        """
+        get_inline_policies_for_role(role_name: str) -> Dict[str, Dict[str, Any]]
+        Returns the inline policies for a given role.
+
+        The resulting dict has the form:
+        {
+            "PolicyName": { PolicyDocument ... },
+            ...
+        }
+        """
+        result = {}
+        for policy_name in self.get_inline_policy_names_for_role(role_name):
+            response = self.iam.get_role_policy(
+                RoleName=role_name, PolicyName=policy_name)
+            result[policy_name] = json_loads(response["PolicyDocument"])
+
+        return result
+
+class CustomRestrictedRoleHandler(RolemakerAPI):
+    """
+    Handle CloudFormation Custom::RestrictedRole resource requests.
+    """
+    create_props = {
+        "RoleName", "AssumeRolePolicyDocument", "Path", "Description"
+    }
+    valid_props = create_props.union({"Policies", "ManagedPolicyArns"})
+
     def __init__(self, event: Dict[str, Any], context: Any) -> None:
-        super(CustomResourceHandler, self).__init__()
+        super(CustomRestrictedRoleHandler, self).__init__()
         self.event = event
         self.context = context
 
@@ -65,6 +467,27 @@ class CustomResourceHandler(object):
             # By default, supply a UUID.
             self.physical_resource_id = str(uuid4())
         return
+
+    @property
+    def stack_id(self) -> str:
+        """
+        The CloudFormation stack id (ARN).
+        """
+        return self.event["StackId"]
+
+    @property
+    def stack_name(self) -> str:
+        """
+        The name of the stack, extracted from the stack_id.
+        """
+        m = fullmatch(
+            r"arn:aws[^:]*:cloudformation:[^:]*:[^:]*:stack/([^/]+)/.*",
+            self.stack_id)
+        if not m:
+            raise RuntimeError("Could not extract stack name from ARN %s" %
+                               self.stack_id)
+
+        return m.group(1)
 
     @property
     def resource_type(self) -> str:
@@ -81,6 +504,13 @@ class CustomResourceHandler(object):
         return self.event["RequestType"]
 
     @property
+    def logical_resource_id(self) -> str:
+        """
+        The CloudFormation logical resource id.
+        """
+        return self.event["LogicalResourceId"]
+
+    @property
     def resource_properties(self) -> Dict[str, Any]:
         """
         The CloudFormation properties specified for the resource.
@@ -90,28 +520,41 @@ class CustomResourceHandler(object):
             rp = {}
         return rp
 
+    @property
+    def old_resource_properties(self) -> Dict[str, Any]:
+        """
+        The old CloudFormation properties specified for the resource during an
+        update event.
+        """
+        rp = self.event.get("OldResourceProperties")
+        if rp is None:
+            rp = {}
+        return rp
+
     def __call__(self) -> None:
         """
         Execute a CloudFormation custom resource event.
         """
-        result = {"Status": "FAILED"}
+        result = {"Status": "FAILED"}                   # type: Dict[str, Any]
 
         try:
-            handler_key = (self.request_type, self.resource_type)
-            handler = self.resource_handlers.get(handler_key)
+            handler = self.request_type_handlers.get(self.request_type)
             if not handler:
-                raise RolemakerError(
-                    "Unable to handle %s on ResourceType %s: No handler" %
-                    handler_key)
+                raise InvalidParameterValue(
+                    "Cannot handle CloudFormation RequestType %s" %
+                    self.request_type)
 
-            handler(self)
+            result = handler(self)
+
+            if "PhysicalResourceId" in result:
+                self.physical_resource_id = result.pop("PhysicalResourceId")
+
             result.update({
                 "Status": "SUCCESS",
-                "Data": self.data,
+                "Data": result,
             })
-        except RolemakerError as e:
-            log.warning("RolemakerError: %s(%s)", type(e).__name__, e,
-                        exc_info=True)
+        except BotoClientError as e:
+            log.warning("BotoClientError: %s", e, exc_info=True)
             result.update({
                 "Status": "FAILED",
                 "Reason": "ClientError: %s" % e,
@@ -154,269 +597,431 @@ class CustomResourceHandler(object):
 
         return
 
-    def create_restricted_role(self) -> None:
+    @api("Create Custom::RestrictedRole")
+    def handle_create_restricted_role(self) -> Dict[str, Any]:
         """
-        Create the basic structure of a restricted role
+        Create the basic structure of a restricted role.
         """
-        mandatory_policy_arn = environ["MANDATORY_ROLE_POLICY_ARN"]
-        role_name = self.resource_properties.get("RoleName")
-        path = self.resource_properties.get("Path", "/")
-        description = self.resource_properties.get("Description", "")
+        self.check_resource_properties()
+        create_kw = {}
 
-        if not role_name:
-            raise RolemakerError("RoleName must be specified")
+        for key in self.create_props:
+            if key in self.resource_properties:
+                create_kw[key] = self.resource_properties[key]
 
-        # Note: We DO NOT use the user's specified assume role policy
-        # document here just in case we can't attach the mandatory
-        # role.
-        response = iam.create_role(
-            Path=path, RoleName=role_name,
-            AssumeRolePolicyDocument=ASSUME_ROLE_POLICY_NOOP,
-            Description=description)
+        if isinstance(create_kw.get("AssumeRolePolicyDocument"), dict):
+            # Convert this to a string for the API call.
+            create_kw["AssumeRolePolicyDocument"] = json_dumps(
+                create_kw["AssumeRolePolicyDocument"], indent=4)
 
-        self.physical_resource_id = response["Role"]["Arn"]
+        if "RoleName" not in create_kw:
+            base_name = self.stack_name + "-" + self.logical_resource_id
+            suffix = "-" + b32encode(urandom(10)).decode("utf-8").rstrip("=")
 
-        # Immediately attach the mandatory policy. If we fail to do so,
-        # delete the role so it cannot be used.
+            # Remove characters from base_name if the result would exceed 64,
+            # the limit for the role name.
+            base_name = base_name[:64 - len(suffix)]
+            create_kw["RoleName"] = base_name + suffix
+
+        # Create the base role structure first.
+        response = self.create_restricted_role(**create_kw)
+        role_name = response["Role"]["RoleName"]
+
         try:
-            iam.attach_role_policy(
-                RoleName=role_name, PolicyArn=mandatory_policy_arn)
+            # Attach managed policy arns.
+            for arn in self.resource_properties.get("ManagedPolicyArns", []):
+                self.attach_restricted_role_policy(
+                    RoleName=role_name, PolicyArn=arn)
 
-            # Now we can apply the other role bits, fixup the assume role document,
-            # etc.
-            self.update_or_delete_restricted_role()
+            # Attach inline policies.
+            for policy in self.resource_properties.get("Policies", []):
+                policy_name = policy.pop("PolicyName", None)
+                policy_doc = policy.pop("PolicyDocument", None)
+                if not policy_name:
+                    raise InvalidParameterValue("PolicyName cannot be empty")
+                if not policy_doc:
+                    raise InvalidParameterValue(
+                        "PolicyDocument cannot be empty")
+
+                # Make sure nothing else has been specified.
+                if policy:
+                    raise InvalidParameterValue(
+                        "Invalid policy parameter(s): %s" % ",".join(policy))
+
+                if isinstance(policy_doc, dict):
+                    # Convert this to a string for the API call.
+                    policy_doc = json_dumps(policy_doc, indent=4)
+
+                self.put_restricted_role_policy(
+                    RoleName=role_name, PolicyName=policy_name,
+                    PolicyDocument=policy_doc)
+        except:
+            # Can't create it; roll back.
+            self.force_delete_role(RoleName=role_name)
+            raise
+
+        self.physical_resource_id = role_name
+        return {
+            "Arn": response["Role"]["Arn"]
+        }
+
+    @api("Delete Custom::RestrictedRole")
+    def handle_delete_restricted_role(self) -> Dict[str, Any]:
+        """
+        Deletes a restricted role.
+        """
+        role_name = self.physical_resource_id
+        self.assert_is_restricted_role(role_name)
+        self.force_delete_role(RoleName=role_name)
+        return {}
+
+    @api("Update Custom::RestrictedRole")
+    def handle_update_restricted_role(self) -> Dict[str, Any]:
+        """
+        Update a role, replacing it if the role name has changed.
+        """
+        self.check_resource_properties()
+
+        old_role_name = self.old_resource_properties["RoleName"]
+        new_role_name = self.resource_properties.get("RoleName")
+        old_path = self.old_resource_properties.get("Path", "/")
+        new_path = self.resource_properties.get("Path", "/")
+
+        if not new_role_name:
+            raise InvalidParameterValue("RoleName cannot be empty")
+
+        if old_role_name != new_role_name:
+            # Replacement -- create the new one, delete the old one.
+            return self.handle_replace_update()
+        elif old_path != new_path:
+            raise InvalidParameterValue(
+                "Cannot update the path to an existing role. Rename the role "
+                "and update the stack again.")
+        else:
+            return self.handle_inplace_update()
+
+    def handle_replace_update(self) -> Dict[str, Any]:
+        """
+        Update a role by creating a new one and deleting the old one.
+        """
+        old_role_name = self.old_resource_properties["RoleName"]
+        new_role_name = self.resource_properties["RoleName"]
+        result = self.handle_create_restricted_role()
+        try:
+            self.iam.get_role(RoleName=old_role_name)
         except BotoClientError as e:
-            log.error("Failed to configure role %s: %s", role_name, e,
-                      exc_info=True)
+            if e.response["Error"].get("Code") != "NoSuchEntity":
+                raise
+        else:
             try:
-                delete_role(role_name)
-            except BotoClientError as e2:
-                log.error("Failed to delete role %s while cleaning up: %s",
-                          role_name, e2, exc_info=True)
-            raise RuntimeError(
-                "Unable to configure role %s: %s" % (role_name, e))
+                self.assert_is_restricted_role(RoleName=old_role_name)
+                self.force_delete_role(RoleName=old_role_name)
+            except:
+                # Can't delete the old one, so rollback the new.
+                self.force_delete_role(RoleName=new_role_name)
+                raise
 
-        return
+        self.physical_resource_id = new_role_name
+        return {
+            "Arn": result["Role"]["Arn"]
+        }
 
-    def update_or_delete_restricted_role(self) -> None:
+    def handle_inplace_update(self) -> Dict[str, Any]: # pylint: disable=R0912,R0914,R0915
         """
-        Make a role conform to the specified pieces.
+        Update a role by replacing its properties.
         """
-        role_info = get_role_for_arn(self.physical_resource_id)
-        role_name = role_info["RoleName"]
+        role_name = self.resource_properties["RoleName"]
+        self.assert_is_restricted_role(RoleName=role_name)
 
-        # The physical resource id is the role ARN, which may contain a path.
-        # We need to derive the name from this.
-        if self.request_type == "Delete":
-            delete_role(role_name)
-            return
+        old = self.old_resource_properties
+        new = self.resource_properties
 
-        if role_name != self.resource_properties.get("RoleName"):
-            raise RolemakerError(
-                "Cannot change role name %r to %r: role names are immutable" %
-                (role_name, self.resource_properties.get("RoleName")))
+        role_info = self.iam.get_role(RoleName=role_name)
 
-        mandatory_policy_arn = environ["MANDATORY_ROLE_POLICY_ARN"]
-        desired_attached_policies = self.resource_properties.get(
-            "AttachedPolicies", [])
-        desired_inline_policies = self.resource_properties.get(
-            "InlinePolicies", {})
-        desired_assume_role_policy = self.resource_properties.get(
-            "AssumeRolePolicyDocument")
-        current_assume_role_policy = role_info["AssumeRolePolicyDocument"]
+        # Get the previous properties. Note that we don't do a delta against
+        # the existing (so we keep any out-of-band modifications) -- this is
+        # in keeping with the existing behavior of AWS::IAM::Role.
+        old_description = old.get("Description", "")
+        old_assume_doc = old["AssumeRolePolicyDocument"]
+        old_attached_policies = set(old.get("ManagedPolicyArns", []))
+        old_inline_policies = old.get("Policies", [])
 
-        check_role_parameters(
-            desired_assume_role_policy, desired_inline_policies,
-            desired_attached_policies)
+        new_description = new.get("Description", "")
+        new_assume_doc = new["AssumeRolePolicyDocument"]
+        new_attached_policies = set(new.get("ManagedPolicyArns", []))
+        new_inline_policies = new.get("Policies", [])
 
-        desired_attached_policies = set(desired_attached_policies)
-        desired_attached_policies.add(mandatory_policy_arn)
+        # Make sure both assume role policies are JSON structures for
+        # comparison.
+        old_assume_doc = self.policy_as_json(
+            old_assume_doc, default=ASSUME_ROLE_POLICY_NOOP)
+        new_assume_doc = self.policy_as_json(
+            new_assume_doc, name="AssumeRolePolicyDocument")
 
-        # Update the assume role policy document if needed
-        if current_assume_role_policy != desired_assume_role_policy:
-            iam.update_assume_role_policy(
-                RoleName=role_name,
-                PolicyDocument=json_dumps(desired_assume_role_policy))
+        # Do the same for inline policies
+        old_ip_dict = self.inline_policies_as_dict(
+            old_inline_policies)
+        new_ip_dict = self.inline_policies_as_dict(
+            new_inline_policies)
 
-        # Get the existing policies for this role
-        current_attached_policies = get_attached_policies_for_role(role_name)
-        current_inline_policies = get_inline_policies_for_role(role_name)
+        # If we need to roll back, this is a list of callables to invoke to
+        # perform the roll back.
+        undo = []
 
-        # Delete unnecessary policies first so we don't go over limits.
-        for arn in current_attached_policies - desired_attached_policies:
-            iam.detach_role_policy(RoleName=role_name, PolicyArn=arn)
+        try:
+            # Update the description if needed.
+            if old_description != new_description:
+                self.update_restricted_role_description(
+                    RoleName=role_name, Description=new_description)
+                undo.append(
+                    (self.update_restricted_role_description,
+                     dict(RoleName=role_name, Description=old_description)))
 
-        # Then attach new policies
-        for arn in desired_attached_policies - current_attached_policies:
-            try:
-                iam.attach_role_policy(RoleName=role_name, PolicyArn=arn)
-            except BotoClientError as e:
-                raise RolemakerError(
-                    "Unable to attach policy %s to role %s: %s" %
-                    (arn, role_name, e))
+            # Update the assume role policy document if needed
+            if old_assume_doc != new_assume_doc:
+                self.update_assume_restricted_role_policy(
+                    RoleName=role_name,
+                    PolicyDocument=json_dumps(new_assume_doc, indent=4))
+                undo.append(
+                    (self.update_assume_restricted_role_policy,
+                     dict(RoleName=role_name,
+                          PolicyDocument=json_dumps(old_assume_doc, indent=4))))
 
-        # Delete unnecessary inline policies first, again for limits.
-        for key in current_inline_policies:
-            if key not in desired_inline_policies:
-                iam.delete_role_policy(RoleName=role_name, PolicyName=key)
+            arns_to_remove = old_attached_policies - new_attached_policies
+            arns_to_add = new_attached_policies - old_attached_policies
 
-        # Then attach new policies
-        for key, policy in desired_inline_policies.items():
-            current_policy = current_inline_policies.get(key)
+            # Remove any managed policy arns no longer present. This has to
+            # happen first to avoid going over the limit of 10 arns.
+            for arn in arns_to_remove:
+                self.detach_restricted_role_policy(
+                    RoleName=role_name, PolicyArn=arn)
+                undo.append(
+                    (self.attach_restricted_role_policy,
+                     dict(RoleName=role_name, PolicyArn=arn)))
 
-            if policy != current_policy:
+            # Add any new managed policy arns.
+            for arn in arns_to_add:
+                self.attach_restricted_role_policy(
+                    RoleName=role_name, PolicyArn=arn)
+                undo.append(
+                    (self.detach_restricted_role_policy,
+                     dict(RoleName=role_name, PolicyArn=arn)))
+
+            # Remove any inline policies no longer present. Again, limits.
+            for policy_name, old_doc in old_ip_dict.items():
+                if policy_name in new_ip_dict:
+                    continue
+
+                self.delete_restricted_role_policy(
+                    RoleName=role_name, PolicyName=policy_name)
+                undo.append(
+                    (self.put_restricted_role_policy,
+                     dict(RoleName=role_name, PolicyName=policy_name,
+                          PolicyDocument=json_dumps(old_doc, indent=4))))
+
+            # Add or replace any new or modified inline policies.
+            for policy_name, new_doc in new_ip_dict.items():
+                old_doc = old_ip_dict.get(policy_name)
+
+                if old_doc == new_doc:
+                    continue
+
+                self.put_restricted_role_policy(
+                    RoleName=role_name, PolicyName=policy_name,
+                    PolicyDocument=json_dumps(new_doc, indent=4))
+
+                if old_doc:
+                    # Modify -- undo has to put the modification back
+                    undo.append(
+                        (self.put_restricted_role_policy,
+                         dict(RoleName=role_name, PolicyName=policy_name,
+                              PolicyDocument=json_dumps(old_doc, indent=4))))
+                else:
+                    # Add -- undo has to remove the policy
+                    undo.append(
+                        (self.delete_restricted_role_policy,
+                         dict(RoleName=role_name, PolicyName=policy_name)))
+
+        except:
+            # Perform the undo actions.
+            undo.reverse()
+            for i, func_kw in enumerate(undo):
+                func, kw = func_kw
+                log.info("Perform rollback action %d: %s(**%s)", i, func, kw)
                 try:
-                    iam.put_role_policy(
-                        RoleName=role_name, PolicyName=key,
-                        PolicyDocument=json_dumps(policy))
-                except BotoClientError as e:
-                    raise RolemakerError(
-                        "Unable to put inline policy %s to role %s: %s" %
-                        (key, role_name, e))
+                    func(**kw)
+                except Exception as e:                  # pylint: disable=W0703
+                    log.error("Failed to perform rollback action %d: %s(%s)",
+                              i, type(e).__name__, e, exc_info=True)
+            raise
+
+        self.physical_resource_id = role_name
+
+        return dict(Arn=role_info["Role"]["Arn"])
+
+    @staticmethod
+    def inline_policies_as_dict(
+            policy_list: List[Dict[str, Any]],
+            default: Optional[Dict[str, Any]]=None) -> Dict[str, Dict[str, Any]]:
+        """
+        inline_policies_as_dict(
+            policy_list: List[Dict[str, Any]]
+            default: Optional[Dict[str, Any]]=None) -> Dict[str, Dict[str, Any]]
+        Convert an inline policy structure in the form:
+            [{"PolicyName": "name1", "PolicyDocument": doc1}, ...]
+        to a dictionary of the form:
+            {"name1": doc1, "name2": doc2, ...}
+
+        If a policy document is a string, it is converted to JSON.
+        """
+        result = {}
+        for policy in policy_list:
+            name = policy.get("PolicyName")
+            if not name:
+                raise InvalidParameterValue("Inline policy missing PolicyName")
+
+            doc = policy.get("PolicyDocument")
+            if not doc:
+                if default is not None:
+                    doc = default
+                else:
+                    raise InvalidParameterValue(
+                        "Inline policy missing PolicyDocument")
+
+            doc = CustomRestrictedRoleHandler.policy_as_json(doc)
+            result[name] = doc
+
+        return result
+
+    @staticmethod
+    def policy_as_json(
+            policy: Union[str, Dict[str, Any]],
+            default: Optional[Dict[str, Any]]=None,
+            name: str="PolicyDocument") -> Dict[str, Any]:
+        """
+        policy_as_json(
+            policy: Union[str, Dict[str, Any]],
+            default: Optional[Dict[str, Any]]=None,
+            parameter_name: str="PolicyDocument") -> Dict[str, Any]
+        Convert a string policy document to its JSON form. If the policy cannot
+        be parsed and default is a dictionary, default is returned; otherwise,
+        a BotoClientError exception is raised.
+        """
+        if isinstance(policy, dict):
+            return policy
+        elif isinstance(policy, str):
+            try:
+                return json_loads(policy)
+            except ValueError:
+                if default is not None:
+                    return default
+
+        raise InvalidParameterValue("%s is not valid JSON" % name)
+
+    def check_resource_properties(self) -> None:
+        """
+        Check the names specified in the resource properties, throwing a
+        BotoClientError exception if an invalid property name is found or
+        the required properties RoleName or AssumeRolePolicyDocument are
+        missing.
+        """
+        invalid_props = []
+        for key in self.resource_properties:
+            if key not in self.valid_props and key != "ServiceToken":
+                invalid_props.append(key)
+
+        if invalid_props:
+            raise InvalidParameterValue(
+                "Unknown properties: %s" % ",".join(invalid_props))
+
+        missing_props = []
+        for key in ("RoleName", "AssumeRolePolicyDocument"):
+            if not self.resource_properties.get(key):
+                missing_props.append(key)
+
+        if missing_props:
+            raise InvalidParameterValue(
+                "Missing or empty properties: %s" % ",".join(missing_props))
 
         return
 
-    resource_handlers = {
-        ("Create", "Custom::RestrictedRole"): create_restricted_role,
-        ("Delete", "Custom::RestrictedRole"): update_or_delete_restricted_role,
-        ("Update", "Custom::RestrictedRole"): update_or_delete_restricted_role,
+    def force_delete_role(self, RoleName: str) -> None:
+        """
+        Deletes the specified role, detaching all policies before doing so.
+        """
+        for arn in self.get_attached_policies_for_role(RoleName):
+            self.iam.detach_role_policy(RoleName=RoleName, PolicyArn=arn)
+
+        for PolicyName in self.get_inline_policy_names_for_role(RoleName):
+            self.iam.delete_role_policy(RoleName=RoleName,
+                                        PolicyName=PolicyName)
+
+        self.iam.delete_role(RoleName=RoleName)
+        return
+
+    request_type_handlers = {
+        "Create": handle_create_restricted_role,
+        "Update": handle_update_restricted_role,
+        "Delete": handle_delete_restricted_role,
     }
 
-def get_role_for_arn(role_arn: str) -> Dict[str, Any]:
+class DirectInvokeHandler(RolemakerAPI):
     """
-    get_role_for_arn(role_arn: str) -> Dict[str, Any]
-    Returns role information given an ARN. This also validates the ARN to
-    ensure it matches the ARN of the associated role name.
+    DirectInvokeHandler(event, context)
+    Handle direct invocations via Lambda:Invoke.
     """
-    log.debug("role_arn=%r", role_arn)
-    try:
-        role_path = role_arn.rsplit(":", 1)[1]
-        log.debug("role_path=%r", role_path)
+    def __init__(self, event: Dict[str, Any], context: Any) -> None:
+        super(DirectInvokeHandler, self).__init__()
+        self.event = event
+        self.context = context
+        return
 
-        role_name = role_path.rsplit("/", 1)[1]
-        log.debug("role_name=%r", role_name)
-    except IndexError:
-        raise RolemakerError(
-            "Invalid PhysicalResourceId: not a valid role ARN: %r" %
-            role_arn)
+    def __call__(self) -> Dict[str, Any]:
+        try:
+            action_name = self.event.get("Action")
+            api_info = self.apis.get(action_name)
+            if not api_info:
+                raise RolemakerError(
+                    "InvalidAction", "Unknown action %s" % action_name,
+                    "Unknown")
 
-    # Make sure the role ARN matches what we expect
-    try:
-        response = iam.get_role(RoleName=role_name)
-        role_info = response["Role"]
-        if role_info["Arn"] != role_arn:
-            raise RolemakerError(
-                "Invalid PhysicalResourceId: role %s has ARN %s which "
-                "doesn't match PhysicalResourceId %s" %
-                (role_name, role_info["Arn"], role_arn))
-    except BotoClientError as e:
-        log.error("Failed to get role %s (arn=%r): %s", role_name,
-                  role_arn, e, exc_info=True)
-        raise RolemakerError(
-            "Invalid PhysicalResourceId: role %s (ARN %s) does not exist" %
-            (role_name, role_arn))
+            # Copy the parameters from the event, omitting the Action
+            # parameter
+            parameters = dict(self.event)
+            parameters.pop("Action")
 
-    return role_info
+            invalid_params = []
+            for key in parameters:
+                if key not in api_info.parameters:
+                    invalid_params.append(key)
 
-def get_attached_policies_for_role(role_name: str) -> Set[str]:
-    """
-    Returns all attached policy ARNs for the given role.
-    """
-    kw = {"RoleName": role_name}
-    result = set()
+            if invalid_params:
+                raise InvalidParameterValue(
+                    "Unknown parameters: %s" % ",".join(invalid_params),
+                    action_name)
 
-    # We need to loop in case the results are paginated.
-    while True:
-        response = iam.list_attached_role_policies(**kw)
-        attached_policies = response.get("AttachedPolicies", [])
-        for policy in attached_policies:
-            result.add(policy["PolicyArn"])
-
-        if not response["IsTruncated"]:
-            return result
-
-        kw["Marker"] = response["Marker"]
-
-def get_inline_policy_names_for_role(role_name: str) -> Set[str]:
-    """
-    get_inline_policies_for_role(role_name: str) -> Set[str]
-    Returns the inline policies names for a given role.
-    """
-    kw = {"RoleName": role_name}
-    policy_names = set()                                       # type: Set[str]
-
-    # Undo the pagination.
-    while True:
-        response = iam.list_role_policies(**kw)
-        policy_names.update(response.get("PolicyNames", []))
-
-        if not response["IsTruncated"]:
-            return policy_names
-
-        kw["Marker"] = response["Marker"]
+            return api_info.method(self, **parameters)
+        except BotoClientError as e:
+            log.warning("BotoClientError: %s", e)
+            return e.response
+        except Exception as e:                          # pylint: disable=W0703
+            log.error("Unknown exception: %s(%s)", type(e).__name__, e,
+                      exc_info=True)
+            return {
+                "Error": {
+                    "Code": "InternalFailure",
+                    "Type": "Receiver",
+                    "Message": "Unhandled exception: %s(%s)" % (
+                        type(e).__name__, e),
+                },
+                "ResponseMetadata": {
+                    "HTTPStatusCode": int(HTTPStatus.INTERNAL_SERVER_ERROR),
+                }
+            }
 
 
-def get_inline_policies_for_role(role_name: str) -> Dict[str, Dict[str, Any]]:
-    """
-    get_inline_policies_for_role(role_name: str) -> Dict[str, Dict[str, Any]]
-    Returns the inline policies for a given role.
-
-    The resulting dict has the form:
-    {
-        "PolicyName": { PolicyDocument ... },
-        ...
-    }
-    """
-    result = {}
-    for policy_name in get_inline_policy_names_for_role(role_name):
-        response = iam.get_role_policy(
-            RoleName=role_name, PolicyName=policy_name)
-        result[policy_name] = json_loads(response["PolicyDocument"])
-
-    return result
-
-def delete_role(role_name: str) -> None:
-    """
-    delete_role(role_name: str) -> None
-    Deletes the specified role, detaching all policies before doing so.
-    """
-    for arn in get_attached_policies_for_role(role_name):
-        iam.detach_role_policy(RoleName=role_name, PolicyArn=arn)
-
-    for policy_name in get_inline_policy_names_for_role(role_name):
-        iam.delete_role_policy(RoleName=role_name, PolicyName=policy_name)
-
-    iam.delete_role(RoleName=role_name)
-    return
-
-def check_role_parameters(assume_role_policy: Any, inline_policies: Any,
-                          attached_policies: Any) -> None:
-    """
-    check_role_parameters(assume_role_policy: Any, inline_policies: Any,
-                          attached_policies: Any) -> None
-    Validate the types of each role parameter, throwing a RolemakerError if
-    the type is incorrect.
-    """
-    if not assume_role_policy:
-        raise RolemakerError("AssumeRolePolicyDocument cannot be empty")
-    if not isinstance(assume_role_policy, dict):
-        raise RolemakerError("AssumeRolePolicyDocument must be a map")
-
-    if (not isinstance(inline_policies, dict) or
-            not all([(isinstance(key, str) and isinstance(value, dict))
-                     for key, value in inline_policies.items()])):
-        raise RolemakerError(
-            "InlinePolicies must be a mapping of policy names to documents")
-
-    if (not isinstance(attached_policies, (list, tuple, set)) or
-            not all([isinstance(el, str)
-                     for el in attached_policies])):
-        raise RolemakerError(
-            "AttachedPolicies must be a list of policy ARNs")
-
-    return
-
-def lambda_handler(event: Dict[str, Any], context: Any) -> None:
+def lambda_handler(event: Dict[str, Any],
+                   context: Any) -> Optional[Dict[str, Any]]:
     """
     Entrypoint for Lambda.
     """
@@ -424,12 +1029,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     try:
         if "ResourceType" in event and "RequestType" in event:
             # This is a custom CloudFormation resource.
-            handler = CustomResourceHandler(event, context)
-            handler()
-    except RolemakerError as e:
-        log.warning("RolemakerError: %s(%s)", type(e).__name__, e,
-                    exc_info=True)
-    except Exception as e:                              # pylint: disable=W0703
+            handler = CustomRestrictedRoleHandler(event, context) # type: RolemakerAPI
+            result = handler()
+        elif "Action" in event:
+            handler = DirectInvokeHandler(event, context)
+            result = handler()
+        else:
+            raise RuntimeError("Cannot handle unknown Lambda event")
+    except Exception as e:
         log.error("Internal error: %s(%s)", type(e).__name__, e, exc_info=True)
-
-    return
+        raise
+    else:
+        log.debug("lambda_handler returning %s", result)
+        return result
