@@ -5,18 +5,20 @@ Test the Lambda handler.
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from json import dumps as json_dumps, loads as json_loads
+from logging import getLogger
 from os import environ
 from threading import Thread
-from unittest import TestCase
+from unittest import skip, TestCase
 
+from botocore.exceptions import ClientError as BotoClientError
 import boto3
 from moto import mock_iam
 import rolemaker
 
 # Fixes for Moto's unimplemented detach_role_policy API.
 # https://github.com/spulec/moto/pull/1052
-from moto.iam.exceptions import IAMNotFoundException
-from moto.iam.models import IAMBackend, iam_backend, ManagedPolicy, Role             # pylint: disable=C0412
+from moto.iam.exceptions import IAMNotFoundException # pylint: disable=C0412
+from moto.iam.models import IAMBackend, iam_backend, ManagedPolicy, Role
 from moto.iam.responses import IamResponse
 def policy_detach_from_role(self, role):
     self.attachment_count -= 1
@@ -77,6 +79,7 @@ class ResponseHandler(BaseHTTPRequestHandler):
     """
     Handles S3 POSTs that the Lambda handler sends its results to.
     """
+    log = getLogger("http")
     responses = []
 
     def do_PUT(self):
@@ -93,6 +96,13 @@ class ResponseHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         return
+
+    def log_message(self, format, *args): # pylint: disable=W0622
+        """
+        Log messages to the regular logging facility; BaseHTTPRequestHandler
+        forcibly prints them to stderr.
+        """
+        self.log.info(format, *args)
 
 OPEN_MANDATORY_POLICY = {
     "Version": "2012-10-17",
@@ -169,7 +179,7 @@ class TestCustomResourceHandler(TestCase):
         sockname = self.server.socket.getsockname()
 
         event = {
-            "StackId": "stack-1234",
+            "StackId": "arn:aws:cloudformation:us-west-2:12345678:stack/stack-1234",
             "RequestId": "req-1234",
             "LogicalResourceId": LogicalResourceId,
             "RequestType": RequestType,
@@ -179,6 +189,9 @@ class TestCustomResourceHandler(TestCase):
 
         if "PhysicalResourceId" in kw:
             event["PhysicalResourceId"] = kw.pop("PhysicalResourceId")
+
+        if "OldResourceProperties" in kw:
+            event["OldResourceProperties"] = kw.pop("OldResourceProperties")
 
         event["ResourceProperties"] = kw
 
@@ -205,6 +218,70 @@ class TestCustomResourceHandler(TestCase):
         self.assertEqual(role["Role"]["RoleName"], "test-role")
         arp = role["Role"]["AssumeRolePolicyDocument"]
         self.assertEqual(BASIC_ASSUME_ROLE_POLICY, arp)
+
+    def test_policy_updates(self):
+        create_props = {
+            "AssumeRolePolicyDocument": BASIC_ASSUME_ROLE_POLICY,
+            "ManagedPolicyArns": [self.power_arn],
+            "Policies": [
+                {
+                    "PolicyName": "strtest",
+                    "PolicyDocument": json_dumps(OPEN_MANDATORY_POLICY)
+                },
+                {
+                    "PolicyName": "jsontest",
+                    "PolicyDocument": OPEN_MANDATORY_POLICY
+                }
+            ]
+        }
+
+        update_props = {
+            "AssumeRolePolicyDocument": BASIC_ASSUME_ROLE_POLICY,
+            "ManagedPolicyArns": [self.power_arn],
+            "Policies": [
+                {
+                    "PolicyName": "strtest",
+                    "PolicyDocument": json_dumps(OPEN_MANDATORY_POLICY)
+                },
+                {
+                    "PolicyName": "jsontest2",
+                    "PolicyDocument": OPEN_MANDATORY_POLICY
+                }
+            ]
+        }
+
+        response = self.invoke(
+            ResourceType="Custom::RestrictedRole", **create_props)
+        role_name = response["PhysicalResourceId"]
+        self.iam.get_role(RoleName=role_name)
+        attached = self.iam.list_attached_role_policies(RoleName=role_name)[
+            "AttachedPolicies"]
+        self.assertEqual(len(attached), 2)
+        policy_arns = set([pol["PolicyArn"] for pol in attached])
+        self.assertEqual(policy_arns, {self.mandatory_arn, self.power_arn})
+
+        inline = set(
+            self.iam.list_role_policies(RoleName=role_name)["PolicyNames"])
+        self.assertEqual(inline, {"strtest", "jsontest"})
+
+        response = self.invoke(
+            ResourceType="Custom::RestrictedRole",
+            RequestType="Update",
+            PhysicalResourceId=role_name,
+            OldResourceProperties=create_props,
+            **update_props)
+
+        self.iam.get_role(RoleName=role_name)
+        attached = self.iam.list_attached_role_policies(RoleName=role_name)[
+            "AttachedPolicies"]
+        self.assertEqual(len(attached), 2)
+        policy_arns = set([pol["PolicyArn"] for pol in attached])
+        self.assertEqual(policy_arns, {self.mandatory_arn, self.power_arn})
+
+        inline = set(
+            self.iam.list_role_policies(RoleName=role_name)["PolicyNames"])
+        self.assertEqual(inline, {"strtest", "jsontest2"})
+
 
 @mock_iam
 class TestDirectInvoke(TestCase):
@@ -359,7 +436,9 @@ class TestDirectInvoke(TestCase):
         def check_result(result):
             self.assertIn("Error", result)
             self.assertEqual(result["Error"]["Code"], "InvalidParameterValue")
-            self.assertIn("RoleName cannot be empty", result["Error"]["Message"])
+            self.assertIn(
+                "Invalid length for parameter RoleName, value: 0",
+                result["Error"]["Message"])
 
         result = self.invoke(
             Action="CreateRestrictedRole",
@@ -469,3 +548,299 @@ class TestDirectInvoke(TestCase):
         self.assertIn(
             "Policy arn:aws:iam:::policy/nonexistent was not found",
             result["Error"]["Message"])
+
+    def test_attempt_delete_role_with_policies(self):
+        self.invoke(
+            Action="CreateRestrictedRole",
+            RoleName="test-role",
+            AssumeRolePolicyDocument=json_dumps(BASIC_ASSUME_ROLE_POLICY))
+
+        result = self.invoke(
+            Action="AttachRestrictedRolePolicy",
+            RoleName="test-role",
+            PolicyArn=self.power_arn)
+        self.assertNotIn("Error", result)
+
+        result = self.invoke(
+            Action="DeleteRestrictedRole",
+            RoleName="test-role")
+        self.assertIn("Error", result)
+        self.assertEqual(result["Error"]["Code"], "DeleteConflict")
+        self.assertIn("Cannot delete entity, must detach all policies first.",
+                      result["Error"]["Message"])
+
+        result = self.invoke(
+            Action="DetachRestrictedRolePolicy",
+            RoleName="test-role",
+            PolicyArn=self.power_arn)
+        self.assertNotIn("Error", result)
+
+        result = self.invoke(
+            Action="PutRestrictedRolePolicy",
+            RoleName="test-role",
+            PolicyName="inline1",
+            PolicyDocument=json_dumps(BASIC_ASSUME_ROLE_POLICY))
+        self.assertNotIn("Error", result)
+
+        result = self.invoke(
+            Action="DeleteRestrictedRole",
+            RoleName="test-role")
+        self.assertIn("Error", result)
+        self.assertEqual(result["Error"]["Code"], "DeleteConflict")
+        self.assertIn("Cannot delete entity, must delete policies first.",
+                      result["Error"]["Message"])
+
+        result = self.invoke(
+            Action="DeleteRestrictedRolePolicy",
+            RoleName="test-role",
+            PolicyName="inline1")
+        self.assertNotIn("Error", result)
+
+        result = self.invoke(
+            Action="DeleteRestrictedRole",
+            RoleName="test-role")
+        self.assertNotIn("Error", result)
+
+    def test_create_bad_parameters(self):
+        def check_result(result, message):
+            self.assertIn("Error", result)
+            self.assertEqual(result["Error"]["Code"], "InvalidParameterValue")
+            self.assertIn(message, result["Error"]["Message"])
+
+        check_result(
+            self.invoke(
+                Action="CreateRestrictedRole", RoleName=1234,
+                AssumeRolePolicyDocument="{}", Path="/", Description="1"),
+            "Invalid type for parameter RoleName, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="CreateRestrictedRole", RoleName="test-role",
+                AssumeRolePolicyDocument="", Path="/", Description="1"),
+            "Invalid length for parameter AssumeRolePolicyDocument, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="CreateRestrictedRole", RoleName="test-role",
+                AssumeRolePolicyDocument=1, Path="/", Description="1"),
+            "Invalid type for parameter AssumeRolePolicyDocument, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="CreateRestrictedRole", RoleName="test-role",
+                AssumeRolePolicyDocument="{}", Path=1, Description="1"),
+            "Invalid type for parameter Path, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="CreateRestrictedRole", RoleName="test-role",
+                AssumeRolePolicyDocument="{}", Path="/", Description=1),
+            "Invalid type for parameter Description, value: 1")
+
+    def test_attach_detach_bad_parameters(self):
+        def check_result(result, message):
+            self.assertIn("Error", result)
+            self.assertEqual(result["Error"]["Code"], "InvalidParameterValue")
+            self.assertIn(message, result["Error"]["Message"])
+
+        check_result(
+            self.invoke(
+                Action="AttachRestrictedRolePolicy", RoleName="",
+                PolicyArn=self.power_arn),
+            "Invalid length for parameter RoleName, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="AttachRestrictedRolePolicy", RoleName=1,
+                PolicyArn=self.power_arn),
+            "Invalid type for parameter RoleName, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="AttachRestrictedRolePolicy", RoleName="test-role",
+                PolicyArn=""),
+            "Invalid length for parameter PolicyArn, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="AttachRestrictedRolePolicy", RoleName="test-role",
+                PolicyArn=1),
+            "Invalid type for parameter PolicyArn, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="DetachRestrictedRolePolicy", RoleName="",
+                PolicyArn=self.power_arn),
+            "Invalid length for parameter RoleName, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="DetachRestrictedRolePolicy", RoleName=1,
+                PolicyArn=self.power_arn),
+            "Invalid type for parameter RoleName, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="DetachRestrictedRolePolicy", RoleName="test-role",
+                PolicyArn=""),
+            "Invalid length for parameter PolicyArn, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="DetachRestrictedRolePolicy", RoleName="test-role",
+                PolicyArn=1),
+            "Invalid type for parameter PolicyArn, value: 1")
+
+    def test_put_delete_bad_parameters(self):
+        def check_result(result, message):
+            self.assertIn("Error", result)
+            self.assertEqual(result["Error"]["Code"], "InvalidParameterValue")
+            self.assertIn(message, result["Error"]["Message"])
+
+        check_result(
+            self.invoke(
+                Action="PutRestrictedRolePolicy", RoleName="",
+                PolicyName="inline1",
+                PolicyDocument=json_dumps(POWER_USER_POLICY)),
+            "Invalid length for parameter RoleName, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="PutRestrictedRolePolicy", RoleName=1,
+                PolicyName="inline1",
+                PolicyDocument=json_dumps(POWER_USER_POLICY)),
+            "Invalid type for parameter RoleName, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="PutRestrictedRolePolicy", RoleName="test-role",
+                PolicyName="",
+                PolicyDocument=json_dumps(POWER_USER_POLICY)),
+            "Invalid length for parameter PolicyName, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="PutRestrictedRolePolicy", RoleName="test-role",
+                PolicyName=1,
+                PolicyDocument=json_dumps(POWER_USER_POLICY)),
+            "Invalid type for parameter PolicyName, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="PutRestrictedRolePolicy", RoleName="test-role",
+                PolicyName="inline1", PolicyDocument=""),
+            "Invalid length for parameter PolicyDocument, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="PutRestrictedRolePolicy", RoleName="test-role",
+                PolicyName="inline1", PolicyDocument=1),
+            "Invalid type for parameter PolicyDocument, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="DeleteRestrictedRolePolicy", RoleName="",
+                PolicyName="inline1"),
+            "Invalid length for parameter RoleName, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="DeleteRestrictedRolePolicy", RoleName=1,
+                PolicyName="inline1"),
+            "Invalid type for parameter RoleName, value: 1")
+
+        check_result(
+            self.invoke(
+                Action="DeleteRestrictedRolePolicy", RoleName="test-role",
+                PolicyName=""),
+            "Invalid length for parameter PolicyName, value: 0")
+
+        check_result(
+            self.invoke(
+                Action="DeleteRestrictedRolePolicy", RoleName="test-role",
+                PolicyName=1),
+            "Invalid type for parameter PolicyName, value: 1")
+
+    def test_missing_environ(self):
+        def check_result(result):
+            self.assertIn("Error", result)
+            self.assertEqual(result["Error"]["Code"], "InternalFailure")
+            self.assertEqual(result["Error"]["Type"], "Receiver")
+            self.assertIn(
+                "Environment variable MANDATORY_ROLE_POLICY_ARN has not "
+                "been set on the Lambda function.",
+                result["Error"]["Message"])
+
+        result = self.invoke(
+            Action="CreateRestrictedRole", RoleName="ok-role",
+            AssumeRolePolicyDocument=json_dumps(OPEN_MANDATORY_POLICY))
+        self.assertNotIn("Error", result)
+
+        del environ["MANDATORY_ROLE_POLICY_ARN"]
+        try:
+            check_result(self.invoke(
+                Action="CreateRestrictedRole", RoleName="test-role-missing-env",
+                AssumeRolePolicyDocument="{}", Path="/", Description=""))
+
+            check_result(self.invoke(
+                Action="DeleteRestrictedRole", RoleName="ok-role"))
+
+            check_result(self.invoke(
+                Action="AttachRestrictedRolePolicy", RoleName="ok-role",
+                PolicyArn=self.power_arn))
+
+            check_result(self.invoke(
+                Action="DetachRestrictedRolePolicy", RoleName="ok-role",
+                PolicyArn=self.power_arn))
+
+            check_result(self.invoke(
+                Action="PutRestrictedRolePolicy", RoleName="ok-role",
+                PolicyName="inline1",
+                PolicyDocument=json_dumps(POWER_USER_POLICY)))
+
+            check_result(self.invoke(
+                Action="DeleteRestrictedRolePolicy", RoleName="ok-role",
+                PolicyName="inline1"))
+
+            check_result(self.invoke(
+                Action="UpdateRestrictedRoleDescription", RoleName="ok-role",
+                Description="A new description"))
+
+            check_result(self.invoke(
+                Action="UpdateAssumeRestrictedRolePolicy", RoleName="ok-role",
+                PolicyDocument=json_dumps(OPEN_MANDATORY_POLICY)))
+        finally:
+            environ["MANDATORY_ROLE_POLICY_ARN"] = self.mandatory_arn
+
+    def test_bad_mandatory_policy(self):
+        invalid = "arn:aws:iam::aws:invalid-policy-name"
+        environ["MANDATORY_ROLE_POLICY_ARN"] = invalid
+
+        try:
+            result = self.invoke(
+                Action="CreateRestrictedRole", RoleName="test-role-bad-mand",
+                AssumeRolePolicyDocument="{}", Path="/", Description="")
+            self.assertIn("Error", result)
+            self.assertEqual(result["Error"]["Code"], "InternalFailure")
+            self.assertEqual(result["Error"]["Type"], "Receiver")
+            self.assertIn(
+                "Unable to attach MANDATORY_ROLE_POLICY_ARN %s "
+                "to newly created role." % invalid, result["Error"]["Message"])
+
+            with self.assertRaises(BotoClientError):
+                self.iam.get_role(RoleName="test-role-bad-mand")
+
+        finally:
+            environ["MANDATORY_ROLE_POLICY_ARN"] = self.mandatory_arn
+
+    def test_delete_non_restricted_role(self):
+        self.iam.create_role(
+            RoleName="ok-role-non-restrict",
+            AssumeRolePolicyDocument=json_dumps(BASIC_ASSUME_ROLE_POLICY))
+
+        result = self.invoke(
+            Action="DeleteRestrictedRole", RoleName="ok-role-non-restrict")
+        self.assertIn("Error", result)
+        self.assertEqual(result["Error"]["Code"], "InvalidParameterValue")
+        self.assertIn("Role ok-role-non-restrict is not a restricted "
+                      "role.", result["Error"]["Message"])

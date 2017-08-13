@@ -20,7 +20,8 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import boto3
-from botocore.exceptions import ClientError as BotoClientError
+from botocore.exceptions import (
+    ClientError as BotoClientError, ParamValidationError)
 
 # Enable debug logging
 log = getLogger()
@@ -130,8 +131,20 @@ class RolemakerAPI(object):
     # Handle to the IAM service.
     iam = boto3.client("iam")
     @abstractmethod
-    def __call__(self) -> Optional[Dict[str, Any]]:
+    def __call__(self) -> Optional[Dict[str, Any]]: # pragma: no cover
         raise NotImplementedError()
+
+    @property
+    def mandatory_policy_arn(self):
+        """
+        The ARN of the mandatory policy to apply to each role.
+        """
+        try:
+            return environ["MANDATORY_ROLE_POLICY_ARN"]
+        except KeyError:
+            raise RuntimeError(
+                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
+                "has not been set on the Lambda function.")
 
     @api("CreateRestrictedRole")
     def create_restricted_role(
@@ -140,36 +153,11 @@ class RolemakerAPI(object):
         """
         Create a new restricted role.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
-        if not isinstance(RoleName, str):
-            raise InvalidParameterValue("RoleName must be a string")
-
-        if not AssumeRolePolicyDocument:
-            raise InvalidParameterValue(
-                "AssumeRolePolicyDocument cannot be empty")
-
-        if not isinstance(AssumeRolePolicyDocument, str):
-            raise InvalidParameterValue(
-                "AssumeRolePolicyDocument must be a string")
-
-        if not isinstance(Path, str):
-            raise InvalidParameterValue("Path must be a string")
-
-        if not isinstance(Description, str):
-            raise InvalidParameterValue("Description must be a string")
-
-        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
-        if not mandatory_policy_arn:
-            raise RuntimeError(
-                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
-                "has not been set on the Lambda function.")
+        mandatory_policy_arn = self.mandatory_policy_arn
 
         role_info = self.iam.create_role(
-            RoleName=RoleName,
-            AssumeRolePolicyDocument=AssumeRolePolicyDocument, Path=Path,
-            Description=Description)
+            RoleName=RoleName, Path=Path, Description=Description,
+            AssumeRolePolicyDocument=AssumeRolePolicyDocument)
 
         try:
             log.info("Attaching mandatory policy %s to newly created role %s",
@@ -184,11 +172,13 @@ class RolemakerAPI(object):
                          RoleName)
                 self.iam.delete_role(RoleName=RoleName)
                 log.info("Role %s deleted", RoleName)
-            except Exception as e2:
+            except Exception as e2: # pragma: no cover
                 log.error("Failed to delete role %s: %s(%s)", RoleName,
                           type(e2).__name__, e2, exc_info=True)
                 raise
-            raise
+            raise RuntimeError(
+                "Server error: Unable to attach MANDATORY_ROLE_POLICY_ARN %s "
+                "to newly created role." % mandatory_policy_arn)
         return role_info
 
     @api("DeleteRestrictedRole")
@@ -198,20 +188,13 @@ class RolemakerAPI(object):
         unrestricted roles; the role must have no inline policies attached to
         it and only the mandatory policy attached to it.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
+        mandatory_policy_arn = self.mandatory_policy_arn
         attached_policies = self.get_attached_policies_for_role(RoleName)
         inline_policies = self.get_inline_policy_names_for_role(RoleName)
 
-        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
-        if not mandatory_policy_arn:
-            raise RuntimeError(
-                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
-                "has not been set on the Lambda function.")
-
         if mandatory_policy_arn not in attached_policies:
-            raise InvalidParameterValue("Role %s is not a restricted role.")
+            raise InvalidParameterValue(
+                "Role %s is not a restricted role." % RoleName)
 
         if len(attached_policies) != 1:
             raise DeleteConflict(
@@ -228,7 +211,6 @@ class RolemakerAPI(object):
             PolicyDocument=json_dumps(ASSUME_ROLE_POLICY_NOOP, indent=4))
 
         # Remove the mandatory policy.
-        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
         self.iam.detach_role_policy(
             RoleName=RoleName, PolicyArn=mandatory_policy_arn)
 
@@ -241,12 +223,6 @@ class RolemakerAPI(object):
         """
         Attach a managed policy to a restricted IAM role.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
-        if not PolicyArn:
-            raise InvalidParameterValue("PolicyArn cannot be empty")
-
         self.assert_is_restricted_role(RoleName=RoleName)
         return self.iam.attach_role_policy(
             RoleName=RoleName, PolicyArn=PolicyArn)
@@ -257,19 +233,7 @@ class RolemakerAPI(object):
         """
         Detach a managed policy to a restricted IAM role.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
-        if not PolicyArn:
-            raise InvalidParameterValue("PolicyArn cannot be empty")
-
-        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
-        if not mandatory_policy_arn:
-            raise RuntimeError(
-                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
-                "has not been set on the Lambda function.")
-
-        if PolicyArn == mandatory_policy_arn:
+        if PolicyArn == self.mandatory_policy_arn:
             raise InvalidParameterValue("Cannot detach the mandatory policy.")
 
         self.assert_is_restricted_role(RoleName=RoleName)
@@ -283,15 +247,6 @@ class RolemakerAPI(object):
         """
         Adds or updates an inline policy to a restricted IAM role.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
-        if not PolicyName:
-            raise InvalidParameterValue("PolicyName cannot be empty")
-
-        if not PolicyDocument:
-            raise InvalidParameterValue("PolicyDocument cannot be empty")
-
         self.assert_is_restricted_role(RoleName=RoleName)
         return self.iam.put_role_policy(
             RoleName=RoleName, PolicyName=PolicyName,
@@ -303,12 +258,6 @@ class RolemakerAPI(object):
         """
         Deletes an inline policy from a restricted IAM role.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
-        if not PolicyName:
-            raise InvalidParameterValue("PolicyName cannot be empty")
-
         self.assert_is_restricted_role(RoleName=RoleName)
         return self.iam.delete_role_policy(
             RoleName=RoleName, PolicyName=PolicyName)
@@ -320,12 +269,6 @@ class RolemakerAPI(object):
         Updates the policy that grants an IAM entity permission to assume
         a restricted role.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
-        if not PolicyDocument:
-            raise InvalidParameterValue("PolicyDocument cannot be empty")
-
         self.assert_is_restricted_role(RoleName=RoleName)
         return self.iam.update_assume_role_policy(
             RoleName=RoleName, PolicyDocument=PolicyDocument)
@@ -336,9 +279,6 @@ class RolemakerAPI(object):
         """
         Modifies the description of a restricted role.
         """
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty")
-
         self.assert_is_restricted_role(RoleName=RoleName)
         return self.iam.update_role_description(
             RoleName=RoleName, Description=Description)
@@ -348,15 +288,7 @@ class RolemakerAPI(object):
         Verifies the specified role name is a restricted role by ensuring
         the attached policies includes the mandatory policy ARN.
         """
-        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
-
-        if not mandatory_policy_arn:
-            raise RuntimeError(
-                "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
-                "has not been set on the Lambda function.")
-
-        if not RoleName:
-            raise InvalidParameterValue("RoleName cannot be empty.")
+        mandatory_policy_arn = self.mandatory_policy_arn
 
         kw = {"RoleName": RoleName}
         # We need to loop in case the results are paginated.
@@ -504,7 +436,7 @@ class CustomResourceHandler(RolemakerAPI):
         The name of the stack, extracted from the stack_id.
         """
         m = fullmatch(
-            r"arn:aws[^:]*:cloudformation:[^:]*:[^:]*:stack/([^/]+)/.*",
+            r"arn:aws[^:]*:cloudformation:[^:]*:[^:]*:stack/([^/]+)(/.*)?",
             self.stack_id)
         if not m:
             raise RuntimeError("Could not extract stack name from ARN %s" %
@@ -657,29 +589,29 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
             # the limit for the role name.
             base_name = base_name[:64 - len(suffix)]
             create_kw["RoleName"] = base_name + suffix
+            log.info("Generated RoleName=%r", create_kw["RoleName"])
 
         # Create the base role structure first.
+        log.info("Creating base role: %s", create_kw)
         response = self.create_restricted_role(**create_kw)
         role_name = response["Role"]["RoleName"]
 
         try:
+            log.info("Attaching managed policies to %s", role_name)
             # Attach managed policy arns.
             for arn in self.resource_properties.get("ManagedPolicyArns", []):
+                log.info("Attaching policy %s to role %s", arn, role_name)
                 self.attach_restricted_role_policy(
                     RoleName=role_name, PolicyArn=arn)
 
+            log.info("Putting inline policies on %s", role_name)
             # Attach inline policies.
             for policy in self.resource_properties.get("Policies", []):
-                policy_name = policy.pop("PolicyName", None)
-                policy_doc = policy.pop("PolicyDocument", None)
-                if not policy_name:
-                    raise InvalidParameterValue("PolicyName cannot be empty")
-                if not policy_doc:
-                    raise InvalidParameterValue(
-                        "PolicyDocument cannot be empty")
+                policy_name = policy.get("PolicyName", None)
+                policy_doc = policy.get("PolicyDocument", None)
 
                 # Make sure nothing else has been specified.
-                if policy:
+                if set(policy.keys()) != {"PolicyName", "PolicyDocument"}:
                     raise InvalidParameterValue(
                         "Invalid policy parameter(s): %s" % ",".join(policy))
 
@@ -687,14 +619,19 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
                     # Convert this to a string for the API call.
                     policy_doc = json_dumps(policy_doc, indent=4)
 
+                log.info("Putting policy %s to role %s", policy_name, role_name)
                 self.put_restricted_role_policy(
                     RoleName=role_name, PolicyName=policy_name,
                     PolicyDocument=policy_doc)
-        except:
+        except Exception as e:
             # Can't create it; roll back.
+            log.error("Failed to apply policies to %s: %s(%s)", role_name,
+                      type(e).__name__, e, exc_info=True)
             self.force_delete_role(RoleName=role_name)
             raise
 
+        log.info("Setting physical_resource_id to %r", role_name)
+        log.info("Setting arn to %r", response["Role"]["Arn"])
         self.physical_resource_id = role_name
         return {
             "Arn": response["Role"]["Arn"]
@@ -717,13 +654,12 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
         """
         self.check_resource_properties()
 
-        old_role_name = self.old_resource_properties["RoleName"]
-        new_role_name = self.resource_properties.get("RoleName")
+        old_role_name = self.old_resource_properties.get(
+            "RoleName", self.physical_resource_id)
+        new_role_name = self.resource_properties.get(
+            "RoleName", self.physical_resource_id)
         old_path = self.old_resource_properties.get("Path", "/")
         new_path = self.resource_properties.get("Path", "/")
-
-        if not new_role_name:
-            raise InvalidParameterValue("RoleName cannot be empty")
 
         if old_role_name != new_role_name:
             # Replacement -- create the new one, delete the old one.
@@ -765,7 +701,7 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
         """
         Update a role by replacing its properties.
         """
-        role_name = self.resource_properties["RoleName"]
+        role_name = self.physical_resource_id
         self.assert_is_restricted_role(RoleName=role_name)
 
         old = self.old_resource_properties
@@ -913,6 +849,7 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
         for policy in policy_list:
             name = policy.get("PolicyName")
             if not name:
+                log.error("Inline policy missing PolicyName: %s", policy)
                 raise InvalidParameterValue("Inline policy missing PolicyName")
 
             doc = policy.get("PolicyDocument")
@@ -969,14 +906,9 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
             raise InvalidParameterValue(
                 "Unknown properties: %s" % ",".join(invalid_props))
 
-        missing_props = []
-        for key in ("RoleName", "AssumeRolePolicyDocument"):
-            if not self.resource_properties.get(key):
-                missing_props.append(key)
-
-        if missing_props:
+        if "AssumeRolePolicyDocument" not in self.resource_properties:
             raise InvalidParameterValue(
-                "Missing or empty properties: %s" % ",".join(missing_props))
+                "AssumeRolePolicyDocument is missing or empty.")
 
         return
 
@@ -1039,6 +971,18 @@ class DirectInvokeHandler(RolemakerAPI):
         except BotoClientError as e:
             log.warning("BotoClientError: %s", e)
             return e.response
+        except ParamValidationError as e:
+            log.warning("ParamValidationError: %s", e)
+            return {
+                "Error": {
+                    "Code": "InvalidParameterValue",
+                    "Type": "Sender",
+                    "Message": str(e),
+                },
+                "ResponseMetadata": {
+                    "HTTPStatusCode": int(HTTPStatus.BAD_REQUEST),
+                }
+            }
         except Exception as e:                          # pylint: disable=W0703
             log.error("Unknown exception: %s(%s)", type(e).__name__, e,
                       exc_info=True)
