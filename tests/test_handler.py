@@ -15,7 +15,7 @@ from unittest import TestCase
 from botocore.exceptions import ClientError as BotoClientError
 import boto3
 from moto import mock_iam
-import rolemaker
+import rolemaker_server as rolemaker
 
 # Fixes for Moto's unimplemented detach_role_policy API.
 # https://github.com/spulec/moto/pull/1052
