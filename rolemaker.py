@@ -13,7 +13,9 @@ from json import dumps as json_dumps, loads as json_loads
 from logging import Formatter, getLogger, DEBUG, INFO
 from os import environ, urandom
 from re import fullmatch
-from typing import Any, Callable, cast, Dict, List, NamedTuple, Optional, Set, Union
+from typing import (                                    # pylint: disable=W0611
+    Any, Callable, cast, Dict, List, NamedTuple, Optional, Set, Type, Union,
+)
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -70,6 +72,7 @@ class APIInfo(NamedTuple):                              # pylint: disable=R0903
     method: Callable
     parameters: Set[str]
 
+rolemaker_apis = {}                                 # type: Dict[str, APIInfo]
 def api(api_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """
     Decorator for Rolemaker APIs that sets metadata.
@@ -100,7 +103,7 @@ def api(api_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         last_kwarg = first_kwarg + code.co_kwonlyargcount
         params = set(code.co_varnames[first_kwarg:last_kwarg])
 
-        RolemakerAPI.apis[api_name] = APIInfo(method=wrapper, parameters=params)
+        rolemaker_apis[api_name] = APIInfo(method=wrapper, parameters=params)
         return wrapper
     return decorate_function
 
@@ -126,9 +129,6 @@ class RolemakerAPI(object):
     """
     # Handle to the IAM service.
     iam = boto3.client("iam")
-    mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
-    apis = {}                                       # type: Dict[str, APIInfo]
-
     @abstractmethod
     def __call__(self) -> Optional[Dict[str, Any]]:
         raise NotImplementedError()
@@ -143,11 +143,25 @@ class RolemakerAPI(object):
         if not RoleName:
             raise InvalidParameterValue("RoleName cannot be empty")
 
+        if not isinstance(RoleName, str):
+            raise InvalidParameterValue("RoleName must be a string")
+
         if not AssumeRolePolicyDocument:
             raise InvalidParameterValue(
                 "AssumeRolePolicyDocument cannot be empty")
 
-        if not self.mandatory_policy_arn:
+        if not isinstance(AssumeRolePolicyDocument, str):
+            raise InvalidParameterValue(
+                "AssumeRolePolicyDocument must be a string")
+
+        if not isinstance(Path, str):
+            raise InvalidParameterValue("Path must be a string")
+
+        if not isinstance(Description, str):
+            raise InvalidParameterValue("Description must be a string")
+
+        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
+        if not mandatory_policy_arn:
             raise RuntimeError(
                 "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
                 "has not been set on the Lambda function.")
@@ -158,11 +172,13 @@ class RolemakerAPI(object):
             Description=Description)
 
         try:
+            log.info("Attaching mandatory policy %s to newly created role %s",
+                     mandatory_policy_arn, RoleName)
             self.iam.attach_role_policy(
-                RoleName=RoleName, PolicyArn=self.mandatory_policy_arn)
+                RoleName=RoleName, PolicyArn=mandatory_policy_arn)
         except Exception as e:
             log.error("Failed to attach PolicyArn %s to role %s: %s",
-                      self.mandatory_policy_arn, RoleName, e, exc_info=True)
+                      mandatory_policy_arn, RoleName, e, exc_info=True)
             try:
                 log.info("Deleting role %s because policy attachment failed.",
                          RoleName)
@@ -188,12 +204,13 @@ class RolemakerAPI(object):
         attached_policies = self.get_attached_policies_for_role(RoleName)
         inline_policies = self.get_inline_policy_names_for_role(RoleName)
 
-        if not self.mandatory_policy_arn:
+        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
+        if not mandatory_policy_arn:
             raise RuntimeError(
                 "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
                 "has not been set on the Lambda function.")
 
-        if self.mandatory_policy_arn not in attached_policies:
+        if mandatory_policy_arn not in attached_policies:
             raise InvalidParameterValue("Role %s is not a restricted role.")
 
         if len(attached_policies) != 1:
@@ -211,8 +228,9 @@ class RolemakerAPI(object):
             PolicyDocument=json_dumps(ASSUME_ROLE_POLICY_NOOP, indent=4))
 
         # Remove the mandatory policy.
+        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
         self.iam.detach_role_policy(
-            RoleName=RoleName, PolicyArn=self.mandatory_policy_arn)
+            RoleName=RoleName, PolicyArn=mandatory_policy_arn)
 
         # Now that the role is empty we can delete it.
         return self.iam.delete_role(RoleName=RoleName)
@@ -233,7 +251,7 @@ class RolemakerAPI(object):
         return self.iam.attach_role_policy(
             RoleName=RoleName, PolicyArn=PolicyArn)
 
-    @api("DetachedRestrictedRolePolicy")
+    @api("DetachRestrictedRolePolicy")
     def detach_restricted_role_policy(
             self, *, RoleName: str="", PolicyArn: str="") -> None:
         """
@@ -245,19 +263,20 @@ class RolemakerAPI(object):
         if not PolicyArn:
             raise InvalidParameterValue("PolicyArn cannot be empty")
 
-        if not self.mandatory_policy_arn:
+        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
+        if not mandatory_policy_arn:
             raise RuntimeError(
                 "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
                 "has not been set on the Lambda function.")
 
-        if PolicyArn == self.mandatory_policy_arn:
+        if PolicyArn == mandatory_policy_arn:
             raise InvalidParameterValue("Cannot detach the mandatory policy.")
 
         self.assert_is_restricted_role(RoleName=RoleName)
         return self.iam.detach_role_policy(
             RoleName=RoleName, PolicyArn=PolicyArn)
 
-    @api("PutRestrictedRolPolicy")
+    @api("PutRestrictedRolePolicy")
     def put_restricted_role_policy(
             self, *, RoleName: str="", PolicyName: str="",
             PolicyDocument: str="") -> None:
@@ -329,7 +348,9 @@ class RolemakerAPI(object):
         Verifies the specified role name is a restricted role by ensuring
         the attached policies includes the mandatory policy ARN.
         """
-        if not self.mandatory_policy_arn:
+        mandatory_policy_arn = environ.get("MANDATORY_ROLE_POLICY_ARN")
+
+        if not mandatory_policy_arn:
             raise RuntimeError(
                 "Server error: Environment variable MANDATORY_ROLE_POLICY_ARN "
                 "has not been set on the Lambda function.")
@@ -341,16 +362,20 @@ class RolemakerAPI(object):
         # We need to loop in case the results are paginated.
         while True:
             response = self.iam.list_attached_role_policies(**kw)
-            attached_policies = response.get("AttachedPolicies", [])
-            for policy in attached_policies:
-                if policy == self.mandatory_policy_arn:
-                    return
+            att_policies = response.get("AttachedPolicies", [])
+            log.debug("Attached policies for role %s: %s", RoleName,
+                      att_policies)
+
+            if mandatory_policy_arn in [p["PolicyArn"] for p in att_policies]:
+                log.debug("Found mandatory policy %s", mandatory_policy_arn)
+                return
 
             if not response["IsTruncated"]:
                 break
 
             kw["Marker"] = response["Marker"]
-        raise InvalidParameterValue("Role %s is not a restricted role.")
+        raise InvalidParameterValue(
+            "Role %s is not a restricted role." % RoleName)
 
     def get_role_for_arn(self, role_arn: str) -> Dict[str, Any]:
         """
@@ -445,17 +470,15 @@ class RolemakerAPI(object):
 
         return result
 
-class CustomRestrictedRoleHandler(RolemakerAPI):
-    """
-    Handle CloudFormation Custom::RestrictedRole resource requests.
-    """
-    create_props = {
-        "RoleName", "AssumeRolePolicyDocument", "Path", "Description"
-    }
-    valid_props = create_props.union({"Policies", "ManagedPolicyArns"})
+RequestTypeHandler = Callable[['CustomResourceHandler'], Optional[Dict[str, Any]]]
 
+class CustomResourceHandler(RolemakerAPI):
+    """
+    Lambda custom resource handler base class.
+    """
+    request_type_handlers = {} # type: Dict[str, RequestTypeHandler]
     def __init__(self, event: Dict[str, Any], context: Any) -> None:
-        super(CustomRestrictedRoleHandler, self).__init__()
+        super(CustomResourceHandler, self).__init__()
         self.event = event
         self.context = context
 
@@ -531,7 +554,7 @@ class CustomRestrictedRoleHandler(RolemakerAPI):
             rp = {}
         return rp
 
-    def __call__(self) -> None:
+    def __call__(self) -> Optional[Dict[str, Any]]:
         """
         Execute a CloudFormation custom resource event.
         """
@@ -541,17 +564,17 @@ class CustomRestrictedRoleHandler(RolemakerAPI):
             handler = self.request_type_handlers.get(self.request_type)
             if not handler:
                 raise InvalidParameterValue(
-                    "Cannot handle CloudFormation RequestType %s" %
-                    self.request_type)
+                    "Cannot handle CloudFormation event %s %s" %
+                    (self.request_type, self.resource_type))
 
-            result = handler(self)
+            data = handler(self)
 
-            if "PhysicalResourceId" in result:
+            if "PhysicalResourceId" in data:
                 self.physical_resource_id = result.pop("PhysicalResourceId")
 
             result.update({
                 "Status": "SUCCESS",
-                "Data": result,
+                "Data": data,
             })
         except BotoClientError as e:
             log.warning("BotoClientError: %s", e, exc_info=True)
@@ -574,7 +597,8 @@ class CustomRestrictedRoleHandler(RolemakerAPI):
 
         result["PhysicalResourceId"] = self.physical_resource_id
 
-        # POST the request to the response URL.
+        # PUT the request to the response URL.
+        log.debug("result: %s", result)
         body = json_dumps(result).encode("utf-8")
         headers = {"Content-Type": "", "Content-Length": str(len(body))}
         response_url = self.event.get("ResponseURL")
@@ -586,7 +610,8 @@ class CustomRestrictedRoleHandler(RolemakerAPI):
         if not response_url:
             log.error("No ResponseURL in the request to respond to.")
         else:
-            request = Request(response_url, data=body, headers=headers)
+            request = Request(
+                response_url, data=body, headers=headers, method="PUT")
             response = cast(HTTPResponse, urlopen(request))
             if response.status < 200 or response.status >= 300:
                 log.error("Received HTTP status code %d: %s", response.status,
@@ -595,7 +620,17 @@ class CustomRestrictedRoleHandler(RolemakerAPI):
                 log.info("Received HTTP status code %d: %s", response.status,
                          response.reason)
 
-        return
+        return None
+
+
+class CustomRestrictedRoleHandler(CustomResourceHandler):
+    """
+    Handle CloudFormation Custom::RestrictedRole resource requests.
+    """
+    create_props = {
+        "RoleName", "AssumeRolePolicyDocument", "Path", "Description"
+    }
+    valid_props = create_props.union({"Policies", "ManagedPolicyArns"})
 
     @api("Create Custom::RestrictedRole")
     def handle_create_restricted_role(self) -> Dict[str, Any]:
@@ -979,7 +1014,7 @@ class DirectInvokeHandler(RolemakerAPI):
     def __call__(self) -> Dict[str, Any]:
         try:
             action_name = self.event.get("Action")
-            api_info = self.apis.get(action_name)
+            api_info = rolemaker_apis.get(action_name)
             if not api_info:
                 raise RolemakerError(
                     "InvalidAction", "Unknown action %s" % action_name,
@@ -1019,7 +1054,6 @@ class DirectInvokeHandler(RolemakerAPI):
                 }
             }
 
-
 def lambda_handler(event: Dict[str, Any],
                    context: Any) -> Optional[Dict[str, Any]]:
     """
@@ -1029,11 +1063,14 @@ def lambda_handler(event: Dict[str, Any],
     try:
         if "ResourceType" in event and "RequestType" in event:
             # This is a custom CloudFormation resource.
-            handler = CustomRestrictedRoleHandler(event, context) # type: RolemakerAPI
-            result = handler()
+            if event["ResourceType"] == "Custom::RestrictedRole":
+                cls = CustomRestrictedRoleHandler # type: Type[CustomResourceHandler]
+            else:
+                cls = CustomResourceHandler
+
+            result = cls(event, context)()
         elif "Action" in event:
-            handler = DirectInvokeHandler(event, context)
-            result = handler()
+            result = DirectInvokeHandler(event, context)()
         else:
             raise RuntimeError("Cannot handle unknown Lambda event")
     except Exception as e:

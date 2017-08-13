@@ -1,0 +1,8 @@
+# All of the runtime bits are already in the Lambda runtime. This is just
+# for local testing.
+boto3
+coverage
+moto
+mypy
+nose
+pylint
