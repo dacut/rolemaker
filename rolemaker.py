@@ -641,6 +641,7 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
         Update a role by replacing its properties.
         """
         role_name = self.physical_resource_id
+        log.info("InplaceUpdate: %s", role_name)
         self.assert_is_restricted_role(RoleName=role_name)
 
         old = self.old_resource_properties
@@ -678,7 +679,10 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
 
         try:
             # Update the description if needed.
+            log.debug("InplaceUpdate: Comparing Description: old=%r, new=%r",
+                      old_description, new_description)
             if old_description != new_description:
+                log.debug("InplaceUpdate: Updating Description")
                 self.update_restricted_role_description(
                     RoleName=role_name, Description=new_description)
                 undo.append(
@@ -686,7 +690,10 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
                      dict(RoleName=role_name, Description=old_description)))
 
             # Update the assume role policy document if needed
+            log.debug("InplaceUpdate: Comparing AssumeRolePolicyDocument: "
+                      "old=%r, new=%r", old_assume_doc, new_assume_doc)
             if old_assume_doc != new_assume_doc:
+                log.debug("InplaceUpdate: Updating AssumeRolePolicyDocument")
                 self.update_assume_restricted_role_policy(
                     RoleName=role_name,
                     PolicyDocument=json_dumps(new_assume_doc, indent=4))
@@ -698,9 +705,13 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
             arns_to_remove = old_attached_policies - new_attached_policies
             arns_to_add = new_attached_policies - old_attached_policies
 
+            log.debug("InplaceUpdate: ArnsToRemove: %s", arns_to_remove)
+            log.debug("InplaceUpdate: ArnsToAdd: %s", arns_to_add)
+
             # Remove any managed policy arns no longer present. This has to
             # happen first to avoid going over the limit of 10 arns.
             for arn in arns_to_remove:
+                log.debug("InplaceUpdate: Detaching %s", arn)
                 self.detach_restricted_role_policy(
                     RoleName=role_name, PolicyArn=arn)
                 undo.append(
@@ -709,6 +720,7 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
 
             # Add any new managed policy arns.
             for arn in arns_to_add:
+                log.debug("InplaceUpdate: Attaching %s", arn)
                 self.attach_restricted_role_policy(
                     RoleName=role_name, PolicyArn=arn)
                 undo.append(
@@ -719,6 +731,8 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
             for policy_name, old_doc in old_ip_dict.items():
                 if policy_name in new_ip_dict:
                     continue
+
+                log.debug("InplaceUpdate: Deleting policy %s", policy_name)
 
                 self.delete_restricted_role_policy(
                     RoleName=role_name, PolicyName=policy_name)
@@ -733,6 +747,9 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
 
                 if old_doc == new_doc:
                     continue
+
+                log.debug("InplaceUpdate: Putting policy %s=%s",
+                          policy_name, new_doc)
 
                 self.put_restricted_role_policy(
                     RoleName=role_name, PolicyName=policy_name,
@@ -755,7 +772,9 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
             undo.reverse()
             for i, func_kw in enumerate(undo):
                 func, kw = func_kw
-                log.info("Perform rollback action %d: %s(**%s)", i, func, kw)
+                log.info("Perform rollback action %d: %s(%s)",
+                         i, func.__name__,
+                         ", ".join(["%s=%r" % kv for kv in kw.items()]))
                 try:
                     func(**kw)
                 except Exception as e:                  # pylint: disable=W0703

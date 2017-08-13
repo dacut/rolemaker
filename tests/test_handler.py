@@ -19,7 +19,8 @@ import rolemaker
 
 # Fixes for Moto's unimplemented detach_role_policy API.
 # https://github.com/spulec/moto/pull/1052
-from moto.iam.exceptions import IAMNotFoundException # pylint: disable=C0412
+from moto.core.exceptions import RESTError  # pylint: disable=C0412
+from moto.iam.exceptions import IAMNotFoundException
 from moto.iam.models import IAMBackend, iam_backend, ManagedPolicy, Role
 from moto.iam.responses import IamResponse
 def policy_detach_from_role(self, role):
@@ -34,6 +35,18 @@ def role_delete_policy(self, policy_name):
         raise IAMNotFoundException(
             "The role policy with name {0} cannot be found.".format(policy_name))
 Role.delete_policy = role_delete_policy
+
+class InvalidParameterError(RESTError):
+    code = 400
+    def __init__(self, message):
+        super(InvalidParameterError, self).__init__(
+            "InvalidParameterValue", message)
+
+def role_put_policy(self, policy_name, policy_json):
+    if "TRIGGER_INVALID_JSON" in str(policy_json):
+        raise InvalidParameterError("Policy contains TRIGGER_INVALID_JSON")
+    self.policies[policy_name] = policy_json
+Role.put_policy = role_put_policy
 
 def backend_detach_role_policy(self, policy_arn, role_name):
     arns = dict((p.arn, p) for p in self.managed_policies.values())
@@ -325,6 +338,19 @@ class TestCustomResourceHandler(TestCase):
             ]
         }
 
+        update4_props = {
+            "AssumeRolePolicyDocument": LAMBDA_ASSUME_ROLE_POLICY,
+            "ManagedPolicyArns": [],
+            "Policies": [
+                {
+                    "PolicyName": "jsontest2",
+                    "PolicyDocument": {
+                        "TRIGGER_INVALID_JSON": "Yes",
+                    }
+                }
+            ]
+        }
+
         response = self.invoke(
             ResourceType="Custom::RestrictedRole", **create_props)
         role_name = response["PhysicalResourceId"]
@@ -375,6 +401,7 @@ class TestCustomResourceHandler(TestCase):
             self.iam.list_role_policies(RoleName=role_name)["PolicyNames"])
         self.assertEqual(inline, {"strtest", "jsontest2"})
 
+        # Rollback due to invalid parameter
         response = self.invoke(
             ResourceType="Custom::RestrictedRole",
             RequestType="Update",
@@ -382,6 +409,26 @@ class TestCustomResourceHandler(TestCase):
             OldResourceProperties=update2_props,
             **update3_props)
         self.assertEqual("FAILED", response["Status"])
+        self.iam.get_role(RoleName=role_name)
+        attached = self.iam.list_attached_role_policies(RoleName=role_name)[
+            "AttachedPolicies"]
+        self.assertEqual(len(attached), 2)
+        policy_arns = set([pol["PolicyArn"] for pol in attached])
+        self.assertEqual(policy_arns, {self.mandatory_arn, self.s3_arn})
+
+        inline = set(
+            self.iam.list_role_policies(RoleName=role_name)["PolicyNames"])
+        self.assertEqual(inline, {"strtest", "jsontest2"})
+
+        response = self.invoke(
+            ResourceType="Custom::RestrictedRole",
+            RequestType="Update",
+            PhysicalResourceId=role_name,
+            OldResourceProperties=update2_props,
+            **update4_props)
+        self.assertEqual("FAILED", response["Status"])
+        self.assertIn(
+            "Policy contains TRIGGER_INVALID_JSON", response["Reason"])
         self.iam.get_role(RoleName=role_name)
         attached = self.iam.list_attached_role_policies(RoleName=role_name)[
             "AttachedPolicies"]
