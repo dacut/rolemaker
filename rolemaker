@@ -1,0 +1,254 @@
+#!/usr/bin/env python
+"""
+Usage: rolemaker [general-options] <action> [action-parameters]
+Invoke Rolemaker
+
+General options:
+    -f <name> | --function <name> | --function-name <name>
+        The Lambda function to invoke for Rolemaker. Defaults to "Rolemaker".
+
+    -p <profile> | --profile <profile>
+        Use a specific profile from your credential file.
+
+    -r <region> | --region <region>
+        The region to use.
+
+Actions:
+    attach-restricted-role-policy
+    create-restricted-role
+    delete-restricted-role
+    delete-restricted-role-policy
+    detach-restricted-role-policy
+    put-restricted-role-policy
+    update-assume-restricted-role-document
+    update-restricted-role-description
+
+Type rolemaker <action> --help for more details.
+"""
+# pylint: disable=C0103,W0603
+from __future__ import print_function
+from getopt import getopt, GetoptError
+from json import dumps as json_dumps, loads as json_loads
+from sys import argv, exit as sys_exit, stderr, stdout
+from boto3.session import Session as BotoSession
+
+awslambda = None
+function_name = "Rolemaker"
+
+def main(args):
+    """
+    Main program entrypoint.
+    """
+    global awslambda, function_name
+
+    try:
+        opts, args = getopt(
+            args, "f:hp:r:",
+            ["function=", "function-name=", "help", "profile=", "region="])
+    except GetoptError as e:
+        print(str(e), file=stderr)
+        usage()
+        return 2
+
+    session_kw = {}
+
+    for opt, val in opts:
+        if opt in ["-h", "--help"]:
+            usage(stdout)
+            return 0
+        if opt in ["-f", "--function=", "--function-name="]:
+            function_name = val
+        if opt in ["-p", "--profile"]:
+            session_kw["profile_name"] = val
+        elif opt in ["-r", "--region"]:
+            session_kw["region_name"] = val
+
+    awslambda = BotoSession(**session_kw).client("lambda")
+
+    if not args:
+        print("No action specified", file=stderr)
+        usage()
+        return 2
+
+    action_name = args[0]
+    action_def = actions.get(action_name)
+    if not action_def:
+        print("Unknown action %s" % action_name, file=stderr)
+        return 2
+
+    return execute_action(action_name, action_def, args[1:])
+
+def execute_action(action_name, action_def, args):
+    """
+    Execute an action.
+    """
+    api_name = action_def["Action"]
+    description = action_def.get("Description", "")
+    action_params = action_def.get("Parameters", {})
+    required = set(action_def.get("Required", []))
+
+    cmd_usage = "Usage: rolemaker %s %s\n%s" % (
+        action_name,
+        " ".join(["--%s <%s>" % (key, key) for key in sorted(action_params)]),
+        description
+    )
+
+    try:
+        long_opts = ["help"] + ["%s=" % key for key in action_params]
+        opts, args = getopt(args, "h", long_opts)
+    except GetoptError as e:
+        print(str(e), file=stderr)
+        print(cmd_usage, file=stderr)
+        return 2
+
+    if args:
+        print("Unknown argument %r" % args[0], file=stderr)
+        print(cmd_usage, file=stderr)
+        return 2
+
+    params = {"Action": api_name}
+    for opt, val in opts:
+        if opt in ["-h", "--help"]:
+            print(cmd_usage)
+            return 0
+
+        if not opt.startswith("--"):
+            print("Unknown option %s" % opt, file=stderr)
+            print(usage, file=stderr)
+            return 2
+
+        opt = opt[2:]
+
+        api_param_name = action_params.get(opt)
+        params[api_param_name] = val
+        if opt in required:
+            required.remove(opt)
+
+    if required:
+        for req in sorted(required):
+            print("Missing required parameter --%s" % req, file=stderr)
+        return 2
+
+    return invoke(params)
+
+def invoke(params):
+    """
+    Invoke the Rolemaker Lambda function.
+    """
+    result = awslambda.invoke(
+        FunctionName=function_name, InvocationType="RequestResponse",
+        Payload=json_dumps(params).encode("utf-8"))
+
+    function_error = result.get("FunctionError")
+    payload = result.get("Payload").read()
+
+    if function_error:
+        print("Lambda invocation error: %s" % payload, file=stderr)
+        return 1
+
+    if not payload:
+        return 0
+
+    payload = json_loads(payload.decode("utf-8"))
+    if isinstance(payload, dict):
+        error = payload.get("Error")
+        if error:
+            print("An error occurred (%s) when calling the %s operation: %s" %
+                  (error["Code"], params["Action"], error["Message"]),
+                  file=stderr)
+            return 1
+
+        print(json_dumps(payload), indent=4)
+    elif payload is not None:
+        print(payload)
+
+    return 0
+
+def usage(fd=stderr):
+    """
+    Print usage information.
+    """
+    fd.write(__doc__.lstrip())
+    fd.flush()
+    return
+
+actions = {
+    "attach-restricted-role-policy": {
+        "Action": "AttachRestrictedRolePolicy",
+        "Description": "Attach a managed role to a restricted IAM policy.",
+        "Parameters": {
+            "role-name": "RoleName",
+            "policy-arn": "PolicyArn",
+        },
+        "Required": {"role-name", "policy-arn"},
+    },
+    "create-restricted-role": {
+        "Action": "CreateRestrictedRole",
+        "Description": "Create a role with a mandatory IAM policy attached.",
+        "Parameters": {
+            "role-name": "RoleName",
+            "path": "Path",
+            "assume-role-policy-document": "AssumeRolePolicyDocument",
+            "description": "Description",
+        },
+        "Required": {"role-name", "assume-role-policy-document"},
+    },
+    "delete-restricted-role": {
+        "Action": "DeleteRestrictedRole",
+        "Description": "Delete a restricted role.",
+        "Parameters": {
+            "role-name": "RoleName",
+        },
+        "Required": {"role-name"},
+    },
+    "delete-restricted-role-policy": {
+        "Action": "DeleteRestrictedRolePolicy",
+        "Description": "Delete an inline policy on a restricted role.",
+        "Parameters": {
+            "role-name": "RoleName",
+            "policy-name": "PolicyName",
+        },
+        "Required": {"role-name", "policy-name"},
+    },
+    "detach-restricted-role-policy": {
+        "Action": "DetachRestrictedRolePolicy",
+        "Description": "Detach a managed role from a restricted IAM policy.",
+        "Parameters": {
+            "role-name": "RoleName",
+            "policy-arn": "PolicyArn",
+        },
+        "Required": {"role-name", "policy-arn"},
+    },
+    "put-restricted-role-policy": {
+        "Action": "PutRestrictedRolePolicy",
+        "Description": "Add or update an inline policy on a restricted role.",
+        "Parameters": {
+            "role-name": "RoleName",
+            "policy-name": "PolicyName",
+            "policy-document": "PolicyDocument",
+        },
+        "Required": {"role-name", "policy-name", "policy-document"},
+    },
+    "update-assume-restricted-role-document": {
+        "Action": "UpdateAssumeRestrictedRoleDocument",
+        "Description": "Updates the policy that grants an IAM entity "
+                       "permission to assume a restricted role.",
+        "Parameters": {
+            "role-name": "RoleName",
+            "policy-document": "PolicyDocument",
+        },
+        "Required": {"role-name", "policy-document"},
+    },
+    "update-restricted-role-description": {
+        "Action": "UpdateRestrictedRoleDescription",
+        "Description": "Modifies the description of a restricted role.",
+        "Parameters": {
+            "role-name": "RoleName",
+            "description": "Description",
+        },
+        "Required": {"role-name", "description"},
+    }
+}
+
+if __name__ == "__main__":
+    sys_exit(main(argv[1:]))
