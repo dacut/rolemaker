@@ -206,15 +206,20 @@ class RolemakerAPI(object):
 
         # Set the assume role document to an unusable value in case we are
         # unable to delete the role.
+        log.info("DeleteRestrictedRole: Updating %s assume role policy to "
+                 "noop", RoleName)
         self.iam.update_assume_role_policy(
             RoleName=RoleName,
             PolicyDocument=json_dumps(ASSUME_ROLE_POLICY_NOOP, indent=4))
 
         # Remove the mandatory policy.
+        log.info("DeleteRestrictedRole: Detaching mandatory policy from %s",
+                 RoleName)
         self.iam.detach_role_policy(
             RoleName=RoleName, PolicyArn=mandatory_policy_arn)
 
         # Now that the role is empty we can delete it.
+        log.info("DeleteRestrictedRole: Deleting role %s", RoleName)
         return self.iam.delete_role(RoleName=RoleName)
 
     @api("AttachRestrictedRolePolicy")
@@ -309,42 +314,6 @@ class RolemakerAPI(object):
         raise InvalidParameterValue(
             "Role %s is not a restricted role." % RoleName)
 
-    def get_role_for_arn(self, role_arn: str) -> Dict[str, Any]:
-        """
-        get_role_for_arn(role_arn: str) -> Dict[str, Any]
-        Returns role information given an ARN. This also validates the ARN to
-        ensure it matches the ARN of the associated role name.
-        """
-        log.debug("role_arn=%r", role_arn)
-        try:
-            role_path = role_arn.rsplit(":", 1)[1]
-            log.debug("role_path=%r", role_path)
-
-            role_name = role_path.rsplit("/", 1)[1]
-            log.debug("role_name=%r", role_name)
-        except IndexError:
-            raise InvalidParameterValue(
-                "Invalid PhysicalResourceId: not a valid role ARN: %r" %
-                role_arn)
-
-        # Make sure the role ARN matches what we expect
-        try:
-            response = self.iam.get_role(RoleName=role_name)
-            role_info = response["Role"]
-            if role_info["Arn"] != role_arn:
-                raise InvalidParameterValue(
-                    "Invalid PhysicalResourceId: role %s has ARN %s which "
-                    "doesn't match PhysicalResourceId %s" %
-                    (role_name, role_info["Arn"], role_arn))
-        except BotoClientError as e:
-            log.error("Failed to get role %s (arn=%r): %s", role_name,
-                      role_arn, e, exc_info=True)
-            raise InvalidParameterValue(
-                "Invalid PhysicalResourceId: role %s (ARN %s) does not exist" %
-                (role_name, role_arn))
-
-        return role_info
-
     def get_attached_policies_for_role(self, role_name: str) -> Set[str]:
         """
         Returns all attached policy ARNs for the given role.
@@ -366,7 +335,7 @@ class RolemakerAPI(object):
 
     def get_inline_policy_names_for_role(self, role_name: str) -> Set[str]:
         """
-        get_inline_policies_for_role(role_name: str) -> Set[str]
+        get_inline_policy_names_for_role(role_name: str) -> Set[str]
         Returns the inline policies names for a given role.
         """
         kw = {"RoleName": role_name}
@@ -381,26 +350,6 @@ class RolemakerAPI(object):
                 return policy_names
 
             kw["Marker"] = response["Marker"]
-
-    def get_inline_policies_for_role(
-            self, role_name: str) -> Dict[str, Dict[str, Any]]:
-        """
-        get_inline_policies_for_role(role_name: str) -> Dict[str, Dict[str, Any]]
-        Returns the inline policies for a given role.
-
-        The resulting dict has the form:
-        {
-            "PolicyName": { PolicyDocument ... },
-            ...
-        }
-        """
-        result = {}
-        for policy_name in self.get_inline_policy_names_for_role(role_name):
-            response = self.iam.get_role_policy(
-                RoleName=role_name, PolicyName=policy_name)
-            result[policy_name] = json_loads(response["PolicyDocument"])
-
-        return result
 
 RequestTypeHandler = Callable[['CustomResourceHandler'], Optional[Dict[str, Any]]]
 
@@ -438,7 +387,7 @@ class CustomResourceHandler(RolemakerAPI):
         m = fullmatch(
             r"arn:aws[^:]*:cloudformation:[^:]*:[^:]*:stack/([^/]+)(/.*)?",
             self.stack_id)
-        if not m:
+        if not m: # pragma: no cover
             raise RuntimeError("Could not extract stack name from ARN %s" %
                                self.stack_id)
 
@@ -471,7 +420,7 @@ class CustomResourceHandler(RolemakerAPI):
         The CloudFormation properties specified for the resource.
         """
         rp = self.event.get("ResourceProperties")
-        if rp is None:
+        if rp is None: # pragma: no cover
             rp = {}
         return rp
 
@@ -482,7 +431,7 @@ class CustomResourceHandler(RolemakerAPI):
         update event.
         """
         rp = self.event.get("OldResourceProperties")
-        if rp is None:
+        if rp is None: # pragma: no cover
             rp = {}
         return rp
 
@@ -514,7 +463,7 @@ class CustomResourceHandler(RolemakerAPI):
                 "Status": "FAILED",
                 "Reason": "ClientError: %s" % e,
             })
-        except Exception as e:                              # pylint: disable=W0703
+        except Exception as e:        # pragma: no cover, pylint: disable=W0703
             log.error("Internal error: %s(%s)", type(e).__name__, e,
                       exc_info=True)
             result.update({
@@ -539,7 +488,7 @@ class CustomResourceHandler(RolemakerAPI):
         log.info("Response body: %s", body)
         log.info("Response headers: %s", headers)
 
-        if not response_url:
+        if not response_url:    # pragma: no cover
             log.error("No ResponseURL in the request to respond to.")
         else:
             request = Request(
@@ -606,23 +555,13 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
 
             log.info("Putting inline policies on %s", role_name)
             # Attach inline policies.
-            for policy in self.resource_properties.get("Policies", []):
-                policy_name = policy.get("PolicyName", None)
-                policy_doc = policy.get("PolicyDocument", None)
-
-                # Make sure nothing else has been specified.
-                if set(policy.keys()) != {"PolicyName", "PolicyDocument"}:
-                    raise InvalidParameterValue(
-                        "Invalid policy parameter(s): %s" % ",".join(policy))
-
-                if isinstance(policy_doc, dict):
-                    # Convert this to a string for the API call.
-                    policy_doc = json_dumps(policy_doc, indent=4)
-
+            inline_policies = self.resource_properties.get("Policies", [])
+            ip_dict = self.inline_policies_as_dict(inline_policies)
+            for policy_name, policy_doc in ip_dict.items():
                 log.info("Putting policy %s to role %s", policy_name, role_name)
                 self.put_restricted_role_policy(
                     RoleName=role_name, PolicyName=policy_name,
-                    PolicyDocument=policy_doc)
+                    PolicyDocument=json_dumps(policy_doc, indent=4))
         except Exception as e:
             # Can't create it; roll back.
             log.error("Failed to apply policies to %s: %s(%s)", role_name,
@@ -680,7 +619,7 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
         result = self.handle_create_restricted_role()
         try:
             self.iam.get_role(RoleName=old_role_name)
-        except BotoClientError as e:
+        except BotoClientError as e: # TODO: is this behavior correct?
             if e.response["Error"].get("Code") != "NoSuchEntity":
                 raise
         else:
@@ -694,7 +633,7 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
 
         self.physical_resource_id = new_role_name
         return {
-            "Arn": result["Role"]["Arn"]
+            "Arn": result["Arn"]
         }
 
     def handle_inplace_update(self) -> Dict[str, Any]: # pylint: disable=R0912,R0914,R0915
@@ -730,10 +669,8 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
             new_assume_doc, name="AssumeRolePolicyDocument")
 
         # Do the same for inline policies
-        old_ip_dict = self.inline_policies_as_dict(
-            old_inline_policies)
-        new_ip_dict = self.inline_policies_as_dict(
-            new_inline_policies)
+        old_ip_dict = self.inline_policies_as_dict(old_inline_policies)
+        new_ip_dict = self.inline_policies_as_dict(new_inline_policies)
 
         # If we need to roll back, this is a list of callables to invoke to
         # perform the roll back.
@@ -832,12 +769,10 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
 
     @staticmethod
     def inline_policies_as_dict(
-            policy_list: List[Dict[str, Any]],
-            default: Optional[Dict[str, Any]]=None) -> Dict[str, Dict[str, Any]]:
+            policy_list: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
         inline_policies_as_dict(
-            policy_list: List[Dict[str, Any]]
-            default: Optional[Dict[str, Any]]=None) -> Dict[str, Dict[str, Any]]
+            policy_list: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]
         Convert an inline policy structure in the form:
             [{"PolicyName": "name1", "PolicyDocument": doc1}, ...]
         to a dictionary of the form:
@@ -848,17 +783,40 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
         result = {}
         for policy in policy_list:
             name = policy.get("PolicyName")
-            if not name:
+            if name is None:
                 log.error("Inline policy missing PolicyName: %s", policy)
                 raise InvalidParameterValue("Inline policy missing PolicyName")
 
+            if not isinstance(name, str):
+                raise InvalidParameterValue(
+                    "Invalid type for parameter PolicyName, value: %s, "
+                    "type %s, valid types: %s" % (name, type(name), str))
+
+            if not name:
+                raise InvalidParameterValue(
+                    "Invalid length for parameter PolicyName, value: 0, "
+                    "valid range: 1-inf")
+
             doc = policy.get("PolicyDocument")
-            if not doc:
-                if default is not None:
-                    doc = default
-                else:
-                    raise InvalidParameterValue(
-                        "Inline policy missing PolicyDocument")
+            if doc is None:
+                log.error("Inline policy missing PolicyDocument: %s", policy)
+                raise InvalidParameterValue(
+                    "Inline policy missing PolicyDocument")
+
+            if not isinstance(doc, (str, dict)):
+                raise InvalidParameterValue(
+                    "Invalid type for parameter PolicyDocument, value: %s, "
+                    "type %s, valid types: %s" % (doc, type(doc), (str, dict)))
+
+
+            # Make sure nothing else has been specified.
+            invalid_policy_keys = sorted(
+                set(policy.keys()) - {"PolicyName", "PolicyDocument"})
+
+            if invalid_policy_keys:
+                raise InvalidParameterValue(
+                    "Invalid inline policy parameter(s): %s" %
+                    ",".join(invalid_policy_keys))
 
             doc = CustomRestrictedRoleHandler.policy_as_json(doc)
             result[name] = doc
@@ -908,7 +866,7 @@ class CustomRestrictedRoleHandler(CustomResourceHandler):
 
         if "AssumeRolePolicyDocument" not in self.resource_properties:
             raise InvalidParameterValue(
-                "AssumeRolePolicyDocument is missing or empty.")
+                "AssumeRolePolicyDocument is missing.")
 
         return
 
@@ -964,7 +922,7 @@ class DirectInvokeHandler(RolemakerAPI):
 
             if invalid_params:
                 raise InvalidParameterValue(
-                    "Unknown parameters: %s" % ",".join(invalid_params),
+                    "Unknown parameter(s): %s" % ",".join(invalid_params),
                     action_name)
 
             return api_info.method(self, **parameters)
@@ -1015,7 +973,7 @@ def lambda_handler(event: Dict[str, Any],
             result = cls(event, context)()
         elif "Action" in event:
             result = DirectInvokeHandler(event, context)()
-        else:
+        else: # pragma: no cover
             raise RuntimeError("Cannot handle unknown Lambda event")
     except Exception as e:
         log.error("Internal error: %s(%s)", type(e).__name__, e, exc_info=True)
