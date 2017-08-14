@@ -63,7 +63,7 @@ print(result)
 A CLI wrapper is provided to make this (somewhat) easier from the [Ionosphere distribution endpoint](https://ionosphere-cfn-us-west-2.s3.amazonaws.com/rolemaker). The above call would look like:
 
 ```
-% rolemaker create-restricted-role --role-name TestRole --assume-role-policy-document '\
+% rolemaker create-restricted-role --role-name TestRole --assume-role-policy-document '
 {
     "Version": "2012-10-17",
     "Statement": {
