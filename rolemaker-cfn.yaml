@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Rolemaker deployment"
+Parameters:
+  FunctionName:
+    Type: String
+    Description: The name to give the Lambda function.
+    Default: Rolemaker
+  FunctionRoleName:
+    Type: String
+    Description: The name to give the IAM role for the Lambda function.
+    Default: Lambda-Rolemaker
+  FunctionVersion:
+    Type: String
+    Description: The S3 object version to use.
+    Default: rx79ihjhERQ8WTK3WZVkcbLRLq5yUcXC
+  MandatoryPolicyArn:
+    Type: String
+    Description: The ARN of the mandatory IAM policy to apply to each role.
+Resources:
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref FunctionName
+      Code:
+        S3Bucket: ionosphere-cfn-us-west-2
+        S3Key: rolemaker.zip
+        S3ObjectVersion: !Ref FunctionVersion
+      Handler: "rolemaker_server.lambda_handler"
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 30
+      Environment:
+        Variables:
+          MANDATORY_ROLE_POLICY_ARN: !Ref MandatoryPolicyArn
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref FunctionRoleName
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Action: "sts:AssumeRole"
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+      # Note: This needs to be changed other partitions.
+      #   GovCloud: arn:aws-us-gov
+      #   China: arn:aws-cn
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: IAMAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              Action:
+                - iam:AttachRolePolicy
+                - iam:CreateRole
+                - iam:DeleteRole
+                - iam:DeleteRolePolicy
+                - iam:GetRole
+                - iam:ListAttachedRolePolicies
+                - iam:ListRolePolicies
+                - iam:PutRolePolicy
+                - iam:UpdateAssumeRolePolicy
+                - iam:UpdateRoleDescription
+              Effect: Allow
+              Resource: "*"
